@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2f7d4f">
+  <title>Shopping List</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Shopping List</h1>
+    <nav class="tabs" role="tablist">
+      <button role="tab" class="tab" data-view="list" aria-selected="true">List</button>
+      <button role="tab" class="tab" data-view="pantry" aria-selected="false">Pantry</button>
+      <button role="tab" class="tab" data-view="recipes" aria-selected="false">Recipes</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Shopping list -->
+    <section id="view-list" class="view">
+      <form id="add-form" class="add-form" autocomplete="off">
+        <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name">
+        <input name="quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
+        <select name="section" aria-label="Store section"></select>
+        <button type="submit" class="primary">Add</button>
+      </form>
+      <div id="list" class="groups"></div>
+      <p id="list-empty" class="empty" hidden>Nothing on the list. Add something above.</p>
+      <div class="footer-actions">
+        <button id="clear-checked" class="ghost" hidden>Remove checked items</button>
+      </div>
+    </section>
+
+    <!-- Pantry -->
+    <section id="view-pantry" class="view" hidden>
+      <div class="scan-bar">
+        <button id="scan-btn" class="primary big">📷 Scan barcode</button>
+        <form id="code-form" class="code-form" autocomplete="off">
+          <input name="code" inputmode="numeric" pattern="\d{6,14}" placeholder="…or type a barcode" aria-label="Barcode number">
+          <button type="submit">Look up</button>
+        </form>
+      </div>
+      <form id="pantry-add-form" class="add-form" autocomplete="off">
+        <input name="name" placeholder="Add pantry item by hand" required maxlength="200" aria-label="Item name">
+        <input name="quantity" placeholder="Quantity" maxlength="200" aria-label="Quantity">
+        <button type="submit" class="primary">Add</button>
+      </form>
+      <div id="pantry" class="groups"></div>
+      <p id="pantry-empty" class="empty" hidden>Your pantry is empty. Scan what you have.</p>
+    </section>
+
+    <!-- Recipes -->
+    <section id="view-recipes" class="view" hidden>
+      <div class="recipe-filter" role="group" aria-label="Missing ingredients allowed">
+        <span>Missing at most</span>
+        <div class="segmented">
+          <button data-missing="0">0</button>
+          <button data-missing="1">1</button>
+          <button data-missing="2" aria-pressed="true">2</button>
+          <button data-missing="3">3</button>
+          <button data-missing="">Any</button>
+        </div>
+      </div>
+      <p id="recipes-note" class="muted small"></p>
+      <div id="recipes"></div>
+      <p id="recipes-empty" class="empty" hidden></p>
+    </section>
+  </main>
+
+  <!-- Scanner -->
+  <dialog id="scanner" class="sheet">
+    <div class="scanner-wrap">
+      <video id="video" playsinline muted></video>
+      <div class="reticle"></div>
+    </div>
+    <p id="scan-status" class="scan-status">Point the camera at a barcode</p>
+    <div class="row-actions">
+      <button id="scan-cancel" class="ghost">Close</button>
+    </div>
+  </dialog>
+
+  <!-- Confirm scanned product -->
+  <dialog id="confirm" class="sheet">
+    <form id="confirm-form" method="dialog" autocomplete="off">
+      <h2>Add to pantry</h2>
+      <p id="confirm-source" class="muted"></p>
+      <label>Name <input name="name" required maxlength="200"></label>
+      <label>Quantity <input name="quantity" maxlength="200"></label>
+      <input type="hidden" name="barcode">
+      <div class="row-actions">
+        <button value="cancel" formnovalidate class="ghost">Cancel</button>
+        <button value="add">Add</button>
+        <button value="add-next" class="primary">Add &amp; scan next</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
