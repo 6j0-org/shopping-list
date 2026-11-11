@@ -1,6 +1,7 @@
 # Builds the shopping list image and publishes it to this project's GitLab Container
 # Registry ($CI_REGISTRY_IMAGE). Merge requests only build; the default branch
-# publishes :latest and :<short sha>, and tags publish :<tag>.
+# publishes :latest, :<short sha> and :dev-<short sha>-<unix time> (sortable, for
+# Flux image automation), and tags publish :<tag>.
 
 stages: [build]
 
@@ -34,7 +35,8 @@ build-image:
         tags="$tags -t $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
       elif [ "${CI_COMMIT_BRANCH:-}" = "$CI_DEFAULT_BRANCH" ]; then
         push=true
-        tags="$tags -t $CI_REGISTRY_IMAGE:latest"
+        # dev-<sha>-<unix time>: sortable, for Flux image automation (ImagePolicy picks the newest)
+        tags="$tags -t $CI_REGISTRY_IMAGE:latest -t $CI_REGISTRY_IMAGE:dev-$CI_COMMIT_SHORT_SHA-$(date +%s)"
       fi
       if [ "$push" = true ]; then
         echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
