@@ -412,6 +412,9 @@ const scanner = {
   stream: null,
   zxingControls: null,
   running: false,
+  busy: false, // a barcode is being looked up and added
+  last: null, // { code, at }: the last barcode handled, to skip it while it's still in view
+  unknown: new Set(), // barcodes not in the databases, this time the scanner was open: skipped from then on
 };
 
 function loadScript(src) {
@@ -432,17 +435,23 @@ async function nativeDetector() {
   return formats.length ? new BarcodeDetector({ formats }) : null;
 }
 
+// Scanning keeps the camera on: each barcode found in the databases goes straight into the pantry with a beep, and
+// scanning carries on. A barcode the databases don't know gets a low beep and is skipped: the person sets that item
+// aside and adds it by hand after closing the scanner.
+const SAME_CODE_MS = 1000; // ignore the same barcode for this long after handling it, while it's still in view
+
 async function startScanner() {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     toast("Camera needs HTTPS (or localhost). Type the barcode instead.");
     return;
   }
+  unlockAudio(); // must happen during the tap that opened the scanner
   const dialog = $("#scanner");
   const video = $("#video");
   const status = $("#scan-status");
   status.textContent = "Starting camera…";
   dialog.showModal();
-  scanner.running = true;
+  Object.assign(scanner, { running: true, busy: false, last: null, unknown: new Set() });
 
   try {
     const detector = await nativeDetector();
@@ -456,7 +465,7 @@ async function startScanner() {
       status.textContent = "Point the camera at a barcode";
       while (scanner.running) {
         const codes = await detector.detect(video).catch(() => []);
-        if (codes.length && scanner.running) return onScanned(codes[0].rawValue);
+        if (codes.length && scanner.running) await onScanned(codes[0].rawValue);
         await new Promise((r) => setTimeout(r, 150));
       }
     } else {
@@ -487,51 +496,119 @@ function stopScanner() {
   if ($("#scanner").open) $("#scanner").close();
 }
 
-async function onScanned(code) {
-  stopScanner();
-  navigator.vibrate?.(60);
-  await lookupAndConfirm(code);
+// ---------- Beeps ----------
+// A short tone through Web Audio. Browsers only allow sound after a tap, so the context is made (or resumed) when the
+// scanner opens.
+let audio = null;
+function unlockAudio() {
+  try {
+    audio ||= new AudioContext();
+    if (audio.state === "suspended") audio.resume();
+  } catch { audio = null; }
 }
 
-async function lookupAndConfirm(code) {
-  const existing = state.items.find((i) => i.barcode === code && i.section === state.pantry);
-  toast(`Looking up ${code}…`);
-  let info;
+function beep(ok = true) {
+  navigator.vibrate?.(ok ? 60 : [60, 80, 60]);
+  if (!audio) return;
+  const t = audio.currentTime;
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.type = "sine";
+  osc.frequency.value = ok ? 1500 : 440;
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(0.3, t + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + (ok ? 0.12 : 0.3));
+  osc.connect(gain).connect(audio.destination);
+  osc.start(t);
+  osc.stop(t + (ok ? 0.13 : 0.31));
+}
+
+// ---------- Adding scanned items ----------
+async function lookupBarcode(code) {
   try {
-    info = await api("GET", `/api/barcode/${encodeURIComponent(code)}`);
+    return await api("GET", `/api/barcode/${encodeURIComponent(code)}`);
   } catch (e) {
-    info = { found: false, error: e.message };
+    return { found: false, error: e.message };
   }
+}
+
+async function addToPantry(name, quantity, barcode) {
+  await api("POST", "/api/items", { name, quantity, barcode, section: state.pantry });
+  await refresh();
+}
+
+// One barcode from the camera. Called for every frame that has one, so it skips while the last one is still being
+// handled, and skips the same barcode for a second after (SAME_CODE_MS).
+async function onScanned(code) {
+  const now = Date.now();
+  if (scanner.busy || scanner.unknown.has(code) || (scanner.last?.code === code && now - scanner.last.at < SAME_CODE_MS)) return;
+  scanner.busy = true;
+  const status = $("#scan-status");
+  try {
+    status.textContent = `Looking up ${code}…`;
+    const info = await lookupBarcode(code);
+    if (!scanner.running) return;
+    if (!info.found) {
+      beep(false);
+      if (info.error) {
+        status.textContent = `Couldn't look up ${code}. Try again, or set it aside to add by hand.`;
+      } else {
+        scanner.unknown.add(code); // a lookup that failed may work next time; a miss won't
+        status.textContent = `Not found. Set it aside to add by hand, and scan the next item.`;
+      }
+      return;
+    }
+    try {
+      await addToPantry(info.name, info.quantity || "", code);
+    } catch (e) {
+      beep(false);
+      status.textContent = `Couldn't add ${info.name}: ${e.message}`;
+      return;
+    }
+    beep();
+    status.textContent = `Added ${info.name}. Scan the next item.`;
+  } finally {
+    scanner.last = { code, at: Date.now() };
+    scanner.busy = false;
+  }
+}
+
+// A barcode typed in by hand: add it if the databases know it, otherwise ask for a name.
+async function lookupTyped(code) {
+  toast(`Looking up ${code}…`);
+  const info = await lookupBarcode(code);
+  if (!info.found) return askForName(code, info);
+  await guard(async () => {
+    await addToPantry(info.name, info.quantity || "", code);
+    toast(`Added ${info.name} to pantry`);
+  });
+}
+
+// A typed barcode isn't in the public databases (or the lookup failed): ask for the name.
+function askForName(code, info) {
+  const existing = state.items.find((i) => i.barcode === code && i.section === state.pantry);
   const form = $("#confirm-form");
-  form.name.value = info.found ? info.name : "";
-  form.quantity.value = info.found ? info.quantity || "" : "";
+  form.name.value = "";
+  form.quantity.value = "";
   form.barcode.value = code;
   $("#confirm-source").textContent =
-    (info.found ? `Found in ${info.source} · ${code}` :
-      info.error ? `Lookup failed (${code}). Enter the name yourself.` :
-      `Barcode ${code} isn't in the public databases. Enter the name yourself.`) +
+    (info.error ? `Lookup failed (${code}). Enter the name yourself.`
+                : `Barcode ${code} isn't in the public databases. Enter the name yourself.`) +
     (existing ? ` · Already in pantry as “${existing.name}”.` : "");
   $("#toast").hidden = true;
   $("#confirm").showModal();
-  (info.found ? form.quantity : form.name).focus();
+  form.name.focus();
 }
 
 $("#confirm").addEventListener("close", () => {
   const action = $("#confirm").returnValue;
   const form = $("#confirm-form");
-  if (action !== "add" && action !== "add-next") return;
+  if (action !== "add") return;
   const name = form.name.value.trim();
   if (!name) return toast("Name is required");
   guard(async () => {
-    await api("POST", "/api/items", {
-      name,
-      quantity: form.quantity.value,
-      barcode: form.barcode.value,
-      section: state.pantry,
-    });
+    await addToPantry(name, form.quantity.value, form.barcode.value);
     toast(`Added ${name} to pantry`);
-    await refresh();
-    if (action === "add-next") startScanner();
   });
 });
 
@@ -595,13 +672,20 @@ async function startList() {
   $("#scan-btn").addEventListener("click", startScanner);
   $("#scan-cancel").addEventListener("click", stopScanner);
   $("#scanner").addEventListener("cancel", stopScanner); // Esc key
+  // After scanning, point at the form for adding the set-aside items by hand.
+  $("#scanner").addEventListener("close", () => {
+    const n = scanner.unknown.size;
+    if (!n || !state.me) return;
+    toast(`${n} item${n === 1 ? " wasn't" : "s weren't"} found. Add ${n === 1 ? "it" : "them"} by hand here.`);
+    $("#pantry-add-form").name.focus();
+  });
 
   $("#code-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const code = e.target.code.value.trim();
     if (!/^\d{6,14}$/.test(code)) return toast("Barcodes are 6–14 digits");
     e.target.reset();
-    lookupAndConfirm(code);
+    lookupTyped(code);
   });
 
   // Keep multiple phones in sync when the tab regains focus.
