@@ -391,29 +391,11 @@ function renderRecipe(r, isOpen) {
         r.youtube ? el("a", { href: r.youtube, target: "_blank", rel: "noopener" }, "Video ↗") : null)));
 }
 
-// ---------- Forms ----------
-function wireAddForm(form, fixedSection) {
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const f = new FormData(form);
-    guard(async () => {
-      await api("POST", "/api/items", {
-        name: f.get("name"),
-        quantity: f.get("quantity"),
-        section: fixedSection || f.get("section"),
-      });
-      form.reset();
-      if (form.section) form.section.value = "auto";
-      form.name.focus();
-      await refresh();
-    });
-  });
-}
-
-// ---------- Pantry items typed by hand ----------
-// Names are matched against TheMealDB's ingredient list (the one recipes use), so the pantry says "Peanut Butter"
-// and not "pnut butter", and recipes find it. The list fills the name fields' suggestions as you type. A name that
-// isn't on it gets the closest few to pick from, or can be added as typed.
+// ---------- Adding items by hand ----------
+// Names typed into the shopping list or the pantry are matched against TheMealDB's ingredient list (the one recipes
+// use), so they say "Peanut Butter" and not "pnut butter", and recipes find them. The list fills the name fields'
+// suggestions as you type. A name that isn't on it gets the closest few to pick from, or can be added as typed
+// (paper towels aren't an ingredient).
 const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 async function loadIngredients() {
@@ -449,17 +431,17 @@ function closestIngredients(name, limit = 3) {
   return scored.sort((a, b) => b.score - a.score).slice(0, limit).map((s) => s.display);
 }
 
-function wirePantryAddForm(form) {
-  const panel = $("#pantry-suggest");
+// save(name) adds the item with the form's other fields; panel shows the "isn't in the food list" choices.
+function wireAddForm(form, panel, save) {
   const hidePanel = () => { panel.hidden = true; panel.replaceChildren(); };
   form.name.addEventListener("input", hidePanel);
 
   const add = (name) => guard(async () => {
-    await addToPantry(name, form.quantity.value);
+    await save(name);
     hidePanel();
     form.reset();
+    if (form.section) form.section.value = "auto";
     form.name.focus();
-    toast(`Added ${name} to pantry`);
   });
 
   form.addEventListener("submit", (e) => {
@@ -731,8 +713,15 @@ async function startList() {
   state.pantry = meta.pantry;
   sectionOptions($("#add-form").section);
 
-  wireAddForm($("#add-form"));
-  wirePantryAddForm($("#pantry-add-form"));
+  wireAddForm($("#add-form"), $("#list-suggest"), async (name) => {
+    const form = $("#add-form");
+    await api("POST", "/api/items", { name, quantity: form.quantity.value, section: form.section.value });
+    await refresh();
+  });
+  wireAddForm($("#pantry-add-form"), $("#pantry-suggest"), async (name) => {
+    await addToPantry(name, $("#pantry-add-form").quantity.value);
+    toast(`Added ${name} to pantry`);
+  });
   loadIngredients().catch(() => {}); // suggestions are a nice-to-have; adding works without them
 
   for (const tab of document.querySelectorAll(".tab")) {

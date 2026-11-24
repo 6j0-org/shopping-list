@@ -41,11 +41,13 @@
     <!-- Shopping list -->
     <section id="view-list" class="view" hidden>
       <form id="add-form" class="add-form" autocomplete="off">
-        <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name">
+        <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name" list="ingredients">
         <input name="quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
         <select name="section" aria-label="Store section"></select>
         <button type="submit" class="primary">Add</button>
       </form>
+      <!-- A typed name that isn't in the ingredient list: pick a close one, or add it as typed -->
+      <div id="list-suggest" class="suggest" role="group" aria-live="polite" hidden></div>
       <div id="list" class="groups"></div>
       <p id="list-empty" class="empty" hidden>Nothing on the list. Add something above.</p>
       <div class="footer-actions">
@@ -67,7 +69,6 @@
         <input name="quantity" placeholder="Quantity" maxlength="200" aria-label="Quantity">
         <button type="submit" class="primary">Add</button>
       </form>
-      <!-- A typed name that isn't in the ingredient list: pick a close one, or add it as typed -->
       <div id="pantry-suggest" class="suggest" role="group" aria-live="polite" hidden></div>
       <datalist id="ingredients"></datalist>
       <div id="pantry" class="groups"></div>
