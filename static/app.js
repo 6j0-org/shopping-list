@@ -497,30 +497,44 @@ function stopScanner() {
 }
 
 // ---------- Beeps ----------
-// A short tone through Web Audio. Browsers only allow sound after a tap, so the context is made (or resumed) when the
-// scanner opens.
+// The last step for each scan: a good beep once the item is saved, or a bad beep once the barcode turns out to be
+// unknown (or saving fails). Square waves at full volume, in the 1–3 kHz range phone speakers play loudest, so they
+// carry in a kitchen or a store. Browsers only allow sound after a tap, so the audio context is made when the scanner
+// opens, and resumed before each beep in case the phone suspended it.
 let audio = null;
 function unlockAudio() {
   try {
     audio ||= new AudioContext();
-    if (audio.state === "suspended") audio.resume();
+    if (audio.state !== "running") audio.resume().catch(() => {});
   } catch { audio = null; }
 }
 
-function beep(ok = true) {
-  navigator.vibrate?.(ok ? 60 : [60, 80, 60]);
+const BEEPS = {
+  good: [{ hz: 2400, ms: 160 }],                                   // one short, high beep
+  bad: [{ hz: 600, ms: 220 }, { gap: 90 }, { hz: 600, ms: 220 }],  // two longer, low ones
+};
+
+async function beep(ok = true) {
+  navigator.vibrate?.(ok ? 80 : [200, 90, 200]);
   if (!audio) return;
-  const t = audio.currentTime;
-  const osc = audio.createOscillator();
-  const gain = audio.createGain();
-  osc.type = "sine";
-  osc.frequency.value = ok ? 1500 : 440;
-  gain.gain.setValueAtTime(0.0001, t);
-  gain.gain.exponentialRampToValueAtTime(0.3, t + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + (ok ? 0.12 : 0.3));
-  osc.connect(gain).connect(audio.destination);
-  osc.start(t);
-  osc.stop(t + (ok ? 0.13 : 0.31));
+  if (audio.state !== "running") await audio.resume().catch(() => {});
+  let t = audio.currentTime + 0.01;
+  for (const { hz, ms, gap } of BEEPS[ok ? "good" : "bad"]) {
+    if (gap) { t += gap / 1000; continue; }
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = "square";
+    osc.frequency.value = hz;
+    const end = t + ms / 1000;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.6, t + 0.005); // short ramps, so it doesn't click
+    gain.gain.setValueAtTime(0.6, end - 0.01);
+    gain.gain.linearRampToValueAtTime(0, end);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(t);
+    osc.stop(end);
+    t = end;
+  }
 }
 
 // ---------- Adding scanned items ----------
@@ -532,9 +546,10 @@ async function lookupBarcode(code) {
   }
 }
 
+// Resolves once the item is saved. The list reloads in the background, so a beep doesn't wait for it.
 async function addToPantry(name, quantity, barcode) {
   await api("POST", "/api/items", { name, quantity, barcode, section: state.pantry });
-  await refresh();
+  guard(refresh);
 }
 
 // One barcode from the camera. Called for every frame that has one, so it skips while the last one is still being
