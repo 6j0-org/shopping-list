@@ -510,6 +510,10 @@ function renderRecipe(r, isOpen) {
 // use), so they say "Peanut Butter" and not "pnut butter", and recipes find them. The list fills the name fields'
 // suggestions as you type. A name that isn't on it gets the closest few to pick from, or can be added as typed
 // (paper towels aren't an ingredient).
+//
+// Turned off for the add forms (CHECK_WHEN_ADDING): the matches weren't good enough, so names are added as typed.
+// The suggestions as you type, and the check when renaming an item, still work.
+const CHECK_WHEN_ADDING = false;
 const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 async function loadIngredients() {
@@ -578,7 +582,9 @@ function wireAddForm(form, panel, save) {
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const typed = form.name.value.trim();
-    if (typed) matchName(typed, panel, add);
+    if (!typed) return;
+    if (CHECK_WHEN_ADDING) matchName(typed, panel, add);
+    else add(typed);
   });
 }
 

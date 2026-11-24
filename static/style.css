@@ -241,6 +241,16 @@ dialog label input { color: var(--text); font-size: 1rem; }
   padding: 4px 8px; overflow-wrap: anywhere; user-select: all;
 }
 
+/* ---------- Footer ---------- */
+.site-footer {
+  max-width: 640px; margin: 0 auto; padding: 16px 16px calc(72px + env(safe-area-inset-bottom)); /* room for the toast */
+  border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 0.8rem;
+}
+.site-footer p { margin: 0 0 4px; }
+.site-footer ul { margin: 0; padding-left: 1.2em; }
+.site-footer a { color: inherit; }
+
 /* ---------- Feedback (static/feedback.js) ---------- */
 .fb { display: grid; gap: 12px; margin-top: 8px; }
 .fb-home { display: grid; gap: 12px; }
