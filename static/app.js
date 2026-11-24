@@ -3,7 +3,10 @@ import { finishIdSignIn, hasIdCallback, startIdSignIn } from "./signin.js";
 
 const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js";
 
-const state = { items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list", me: null };
+const state = {
+  items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list", me: null,
+  ingredients: new Map(), // folded name -> TheMealDB ingredient name, for pantry items typed by hand
+};
 const VIEWS = ["list", "pantry", "recipes", "feedback"];
 const $ = (sel) => document.querySelector(sel);
 
@@ -407,6 +410,77 @@ function wireAddForm(form, fixedSection) {
   });
 }
 
+// ---------- Pantry items typed by hand ----------
+// Names are matched against TheMealDB's ingredient list (the one recipes use), so the pantry says "Peanut Butter"
+// and not "pnut butter", and recipes find it. The list fills the name fields' suggestions as you type. A name that
+// isn't on it gets the closest few to pick from, or can be added as typed.
+const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+async function loadIngredients() {
+  const { ingredients } = await api("GET", "/api/ingredients");
+  state.ingredients = new Map(ingredients.map((n) => [fold(n), n]));
+  $("#ingredients").replaceChildren(...ingredients.map((n) => el("option", { value: n })));
+}
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// The ingredients closest to a typed name: ones containing every typed word first (shortest first), then typos.
+function closestIngredients(name, limit = 3) {
+  const typed = fold(name);
+  const words = typed.split(" ").filter(Boolean);
+  const scored = [];
+  for (const [key, display] of state.ingredients) {
+    const keyWords = key.split(" ");
+    const hasAll = words.every((w) => keyWords.some((k) => k.startsWith(w)));
+    const similarity = 1 - editDistance(typed, key) / Math.max(typed.length, key.length);
+    if (hasAll) scored.push({ display, score: 2 - key.length / 100 });
+    else if (similarity >= 0.6) scored.push({ display, score: similarity });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit).map((s) => s.display);
+}
+
+function wirePantryAddForm(form) {
+  const panel = $("#pantry-suggest");
+  const hidePanel = () => { panel.hidden = true; panel.replaceChildren(); };
+  form.name.addEventListener("input", hidePanel);
+
+  const add = (name) => guard(async () => {
+    await addToPantry(name, form.quantity.value);
+    hidePanel();
+    form.reset();
+    form.name.focus();
+    toast(`Added ${name} to pantry`);
+  });
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const typed = form.name.value.trim();
+    if (!typed) return;
+    // Without the list (it didn't load), add as typed rather than block.
+    if (!state.ingredients.size) return add(typed);
+    const exact = state.ingredients.get(fold(typed));
+    if (exact) return add(exact);
+    const close = closestIngredients(typed);
+    panel.replaceChildren(
+      el("p", {}, close.length ? `“${typed}” isn't in the food list. Did you mean:` : `“${typed}” isn't in the food list.`),
+      ...close.map((n) => el("button", { type: "button", class: "small", onclick: () => add(n) }, n)),
+      el("button", { type: "button", class: "small ghost", onclick: () => add(typed) }, `Add “${typed}” anyway`),
+    );
+    panel.hidden = false;
+    panel.querySelector("button").focus();
+  });
+}
+
 // ---------- Barcode scanning ----------
 const scanner = {
   stream: null,
@@ -658,7 +732,8 @@ async function startList() {
   sectionOptions($("#add-form").section);
 
   wireAddForm($("#add-form"));
-  wireAddForm($("#pantry-add-form"), state.pantry);
+  wirePantryAddForm($("#pantry-add-form"));
+  loadIngredients().catch(() => {}); // suggestions are a nice-to-have; adding works without them
 
   for (const tab of document.querySelectorAll(".tab")) {
     tab.addEventListener("click", () => showView(tab.dataset.view));

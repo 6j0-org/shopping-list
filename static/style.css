@@ -88,6 +88,8 @@ button.icon.danger:hover { color: var(--danger); }
 .add-form select { grid-column: 1; }
 .add-form button { grid-column: 2; }
 #pantry-add-form button { grid-column: 1 / -1; }
+.suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -8px 0 16px; }
+.suggest p { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 0.9rem; }
 
 .scan-bar { display: grid; gap: 8px; margin-bottom: 8px; }
 .code-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; }

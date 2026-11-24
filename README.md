@@ -5,7 +5,7 @@ A small self-hosted shopping list. Python 3's standard library, plus [`cryptogra
 - Add, edit (tap an item), check off, and delete items.
 - Quantity is free text: `2`, `2oz`, `a fuckton`, whatever.
 - Items are grouped and sorted by store aisle (Produce → Bakery → Deli → Meat → Dairy → Frozen → … → Pet). The aisle is guessed from the name (`sections.py`); you can override it per item, and an override sticks when you rename the item.
-- **Pantry** tab: scan barcodes with your phone camera to record what you already have. The camera stays on: each product it finds in the barcode databases goes straight into the pantry with a beep, so you can scan one item after another. A barcode the databases don't know gets a low beep instead: set that item aside, keep scanning, and add the set-aside items by hand when you close the scanner. The 🛒 button on a pantry item adds it to the shopping list.
+- **Pantry** tab: scan barcodes with your phone camera to record what you already have. The camera stays on: each product it finds in the barcode databases goes straight into the pantry with a beep, so you can scan one item after another. A barcode the databases don't know gets a low beep instead: set that item aside, keep scanning, and add the set-aside items by hand when you close the scanner. Names typed by hand are matched against TheMealDB's list of about 1,000 generic ingredients (the one recipes use), so the pantry says "Peanut Butter", not "pnut butter", and recipes find it: the list suggests names as you type, and a name that isn't on it offers the closest few, or to add it anyway. The 🛒 button on a pantry item adds it to the shopping list.
 - **Recipes** tab: recipes you can make from your pantry, with the fewest missing ingredients first. Choose how many missing ingredients are OK (0–3 or any). Open a recipe to see its ingredients and instructions, and use "Add N missing to list" to put what you lack on the shopping list.
 - **Accounts:** people sign in with an anonymous identity from a [6j0.org identity server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one passkey (or username and password) covers every 6j0.org app. Everyone who signs in gets their own list and pantry, empty to start.
 - **Share** button: make an invite link and send it to someone (a household, say). When they open it and choose Join, you share one list and pantry. Each link works once, for 7 days. Anyone on a list can invite people, take people off it, or leave; whoever is taken off or leaves starts over with an empty list.
@@ -166,7 +166,7 @@ Scanning uses the browser's built-in `BarcodeDetector` (Chrome/Android). On iOS 
 
 ## Recipes
 
-Recipes come from [TheMealDB](https://www.themealdb.com/api.php) (~800 recipes, free test API key `1`, no signup). The free API can only filter by one ingredient at a time, so the server downloads the whole catalog (26 requests, about 2 seconds) on startup, caches it in SQLite, and refreshes it weekly. Matching happens locally (`recipes.py`):
+Recipes come from [TheMealDB](https://www.themealdb.com/api.php) (~800 recipes, free test API key `1`, no signup). The free API can only filter by one ingredient at a time, so the server downloads the whole catalog (26 requests, about 2 seconds) on startup, caches it in SQLite, and refreshes it weekly, along with TheMealDB's ingredient list (one more request), which the Pantry uses to suggest names. Matching happens locally (`recipes.py`):
 
 - Words that only describe an ingredient (fresh, chopped, extra virgin, unsalted…) are ignored, plurals are folded, and British names are mapped to US ones (aubergine→eggplant, coriander→cilantro, prawn→shrimp…).
 - An ingredient counts as "have" when your pantry item's name contains all of its remaining words. So "Kirkland Extra Virgin Olive Oil" covers "Olive Oil", but a pantry item named just "chicken" does **not** cover "Chicken Thighs".
@@ -197,6 +197,7 @@ answers 401. Items and recipes are those of the signed-in person's list; an item
 | POST | `/api/items/clear-checked` | Deletes checked shopping-list items |
 | GET | `/api/sections` | Aisle order |
 | GET | `/api/barcode/:code` | `{found, name, quantity, source}` |
+| GET | `/api/ingredients` | `{ingredients}`: TheMealDB's ingredient names, sorted, for suggesting pantry names |
 | GET | `/api/recipes?max_missing=N` | Recipes matching the pantry, fewest missing first (top 60) |
 | GET | `/api/feedback` | `{items: [{id, body, created, edited, updated, admin, mine, canDelete, status, replies}], maxLength, isAdmin}`, most recently active first |
 | POST | `/api/feedback` | `{body}` → the new item (400 if empty or over 2048 characters, 429 over the daily limits) |

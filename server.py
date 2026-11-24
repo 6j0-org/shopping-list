@@ -716,6 +716,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send_json(HTTPStatus.OK, list_items(list_id))
         if path == "/api/sections":
             return self._send_json(HTTPStatus.OK, {"sections": sections.SECTIONS, "pantry": sections.PANTRY})
+        if path == "/api/ingredients":
+            _catalog.ensure_fresh(background=True)
+            return self._send_json(HTTPStatus.OK, {"ingredients": _catalog.ingredients()})
         if path == "/api/recipes":
             raw = query.get("max_missing", [""])[0]
             max_missing = int(raw) if raw.isdigit() else None

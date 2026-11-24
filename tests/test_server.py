@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import idtoken  # noqa: E402
+import recipes  # noqa: E402
 import server  # noqa: E402
 from feedback import Feedback  # noqa: E402
 from tests.fakeid import FakeIdServer  # noqa: E402
@@ -37,6 +39,17 @@ class ServerTest(unittest.TestCase):
         server.init_db(os.path.join(cls.tmp.name, "shopping.db"))
         cls.feedback_file = Path(cls.tmp.name, "feedback.jsonl")
         server._feedback = Feedback(cls.feedback_file)
+        # A recipe catalog that's already fresh, so nothing is downloaded.
+        with server._db_lock:
+            server._db.executescript("""
+                CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """)
+            server._db.execute("INSERT OR REPLACE INTO meta VALUES ('recipes_fetched_at', ?)", (str(time.time()),))
+            server._db.execute("INSERT OR REPLACE INTO meta VALUES ('ingredients', ?)",
+                               (json.dumps(["Peanut Butter", "basmati rice", "Basmati Rice", "Butter"]),))
+            server._db.commit()
+        server._catalog = recipes.Catalog(server._db, server._db_lock, "test")
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         cls.port = cls.httpd.server_address[1]
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -133,6 +146,13 @@ class ServerTest(unittest.TestCase):
 
         alice_again, _ = self.sign_in("alice-sub")
         self.assertEqual(self.names(alice_again), ["Bananas"], "signing in again keeps your list")
+
+    def test_ingredient_list(self):
+        sid, _ = self.sign_in("cook-sub")
+        status, body, _ = self.request("GET", "/api/ingredients", sid=sid)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ingredients"], ["basmati rice", "Butter", "Peanut Butter"], "sorted, one per name")
+        self.assertEqual(self.request("GET", "/api/ingredients")[0], 401)
 
     def test_sharing_a_list_by_invite(self):
         host, _ = self.sign_in("host-sub")

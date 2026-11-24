@@ -63,10 +63,13 @@
         </form>
       </div>
       <form id="pantry-add-form" class="add-form" autocomplete="off">
-        <input name="name" placeholder="Add pantry item by hand" required maxlength="200" aria-label="Item name">
+        <input name="name" placeholder="Add pantry item by hand" required maxlength="200" aria-label="Item name" list="ingredients">
         <input name="quantity" placeholder="Quantity" maxlength="200" aria-label="Quantity">
         <button type="submit" class="primary">Add</button>
       </form>
+      <!-- A typed name that isn't in the ingredient list: pick a close one, or add it as typed -->
+      <div id="pantry-suggest" class="suggest" role="group" aria-live="polite" hidden></div>
+      <datalist id="ingredients"></datalist>
       <div id="pantry" class="groups"></div>
       <p id="pantry-empty" class="empty" hidden>Your pantry is empty. Scan what you have.</p>
     </section>
@@ -106,7 +109,7 @@
     <form id="confirm-form" method="dialog" autocomplete="off">
       <h2>Add to pantry</h2>
       <p id="confirm-source" class="muted"></p>
-      <label>Name <input name="name" required maxlength="200"></label>
+      <label>Name <input name="name" required maxlength="200" list="ingredients"></label>
       <label>Quantity <input name="quantity" maxlength="200"></label>
       <input type="hidden" name="barcode">
       <div class="row-actions">

@@ -13,6 +13,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 API = "https://www.themealdb.com/api/json/v1/1/search.php?f={}"
+INGREDIENTS_API = "https://www.themealdb.com/api/json/v1/1/list.php?i=list"
 REFRESH_SECONDS = 7 * 24 * 3600
 
 # Things nearly every kitchen has; never counted as missing.
@@ -77,6 +78,7 @@ class Catalog:
         self.db, self.db_lock, self.user_agent = db, db_lock, user_agent
         self._fetch_lock = threading.Lock()
         self._recipes = None
+        self._ingredients = None
         self._last_attempt = 0
         self.error = None
         with db_lock:
@@ -93,10 +95,13 @@ class Catalog:
             row = self.db.execute("SELECT value FROM meta WHERE key = 'recipes_fetched_at'").fetchone()
         return float(row[0]) if row else 0
 
-    def _fetch_letter(self, letter):
-        req = urllib.request.Request(API.format(letter), headers={"User-Agent": self.user_agent})
+    def _get(self, url):
+        req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.load(resp).get("meals") or []
+
+    def _fetch_letter(self, letter):
+        return self._get(API.format(letter))
 
     def refresh(self):
         """Download the catalog. Keeps the old copy if the download fails."""
@@ -115,7 +120,15 @@ class Catalog:
                 self.error = "TheMealDB returned no recipes"
                 return
             parsed = [self._parse(m) for m in meals]
+            try:  # the ingredient list is a nice-to-have: without it, ingredients() uses the recipes' own
+                names = [(m.get("strIngredient") or "").strip() for m in self._get(INGREDIENTS_API)]
+            except Exception:
+                names = []
             with self.db_lock:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('ingredients', ?)",
+                    (json.dumps([n for n in names if n]),),
+                )
                 self.db.execute("DELETE FROM recipes")
                 self.db.executemany(
                     "INSERT OR REPLACE INTO recipes (id, data) VALUES (?, ?)",
@@ -127,6 +140,7 @@ class Catalog:
                 )
                 self.db.commit()
             self._recipes = None
+            self._ingredients = None
             self.error = None
 
     @staticmethod
@@ -172,6 +186,22 @@ class Catalog:
                 rows = self.db.execute("SELECT data FROM recipes").fetchall()
             self._recipes = [json.loads(r[0]) for r in rows]
         return self._recipes
+
+
+    def ingredients(self):
+        """TheMealDB's ingredient names (about 1,000 generic ones like "Basmati Rice"), for normalizing what people
+        type into the pantry. Falls back to the names the cached recipes use. Sorted, without case-only duplicates."""
+        if self._ingredients is None:
+            with self.db_lock:
+                row = self.db.execute("SELECT value FROM meta WHERE key = 'ingredients'").fetchone()
+            names = json.loads(row[0]) if row else []
+            if not names:
+                names = [i["name"] for r in self.recipes() for i in r["ingredients"]]
+            unique = {}
+            for n in names:
+                unique.setdefault(n.lower(), n)
+            self._ingredients = sorted(unique.values(), key=str.lower)
+        return self._ingredients
 
 
 # --- Matching -------------------------------------------------------------
