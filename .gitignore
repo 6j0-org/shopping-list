@@ -1,3 +1,4 @@
 shopping.db
 *.pem
 __pycache__/
+feedback.jsonl*

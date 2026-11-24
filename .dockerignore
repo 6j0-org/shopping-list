@@ -2,4 +2,7 @@
 !server.py
 !sections.py
 !recipes.py
+!feedback.py
+!idtoken.py
+!requirements.txt
 !static/

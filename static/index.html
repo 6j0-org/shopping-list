@@ -9,8 +9,12 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>Shopping List</h1>
-    <nav class="tabs" role="tablist">
+    <div class="topbar-row">
+      <h1>Shopping List</h1>
+      <button id="feedback-btn" class="small ghost" aria-pressed="false" hidden>Feedback</button>
+      <button id="signout-btn" class="small ghost" hidden>Sign out</button>
+    </div>
+    <nav class="tabs" role="tablist" hidden>
       <button role="tab" class="tab" data-view="list" aria-selected="true">List</button>
       <button role="tab" class="tab" data-view="pantry" aria-selected="false">Pantry</button>
       <button role="tab" class="tab" data-view="recipes" aria-selected="false">Recipes</button>
@@ -18,8 +22,34 @@
   </header>
 
   <main>
+    <p id="loading" class="empty">Loading…</p>
+
+    <!-- Signed out -->
+    <section id="view-signin" class="view" hidden>
+      <div class="card">
+        <h2>Sign in</h2>
+        <p>The shopping list uses your 6j0.org identity: one passkey (or username and password) for every 6j0.org app.</p>
+        <button id="signin-btn" class="primary big">Sign in with 6j0.org</button>
+        <p id="signin-error" class="error" role="alert" hidden></p>
+      </div>
+    </section>
+
+    <!-- Signed in, but not in ALLOWED_SUBS: feedback only -->
+    <section id="view-denied" class="view" hidden>
+      <div class="card">
+        <h2>This list is private</h2>
+        <p>You're signed in, but your 6j0.org identity isn't on this shopping list. To join, send the list's owner your ID:</p>
+        <p class="id-row"><code id="my-id"></code> <button id="copy-id" class="small">Copy</button></p>
+        <p class="muted">You can still read and post feedback below.</p>
+      </div>
+      <div id="denied-feedback"></div>
+    </section>
+
+    <!-- Feedback -->
+    <section id="view-feedback" class="view" hidden></section>
+
     <!-- Shopping list -->
-    <section id="view-list" class="view">
+    <section id="view-list" class="view" hidden>
       <form id="add-form" class="add-form" autocomplete="off">
         <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name">
         <input name="quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
@@ -99,6 +129,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -1,8 +1,10 @@
-"use strict";
+import { mountFeedback } from "./feedback.js";
+import { finishIdSignIn, hasIdCallback, startIdSignIn } from "./signin.js";
 
 const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js";
 
-const state = { items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list" };
+const state = { items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list", me: null };
+const VIEWS = ["list", "pantry", "recipes", "feedback"];
 const $ = (sel) => document.querySelector(sel);
 
 // ---------- API ----------
@@ -14,6 +16,7 @@ async function api(method, path, body) {
   });
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) showSignIn("Your session ended. Please sign in again.");
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -166,10 +169,77 @@ function showView(view) {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.setAttribute("aria-selected", String(tab.dataset.view === view));
   }
+  $("#feedback-btn").setAttribute("aria-pressed", String(view === "feedback"));
   state.view = view;
-  for (const v of ["list", "pantry", "recipes"]) $(`#view-${v}`).hidden = view !== v;
+  for (const v of VIEWS) $(`#view-${v}`).hidden = view !== v;
   history.replaceState(null, "", view === "list" ? location.pathname : `#${view}`);
   if (view === "recipes") guard(loadRecipes);
+  if (view === "feedback") $("#view-feedback").replaceChildren(feedbackElement());
+}
+
+// ---------- Sign-in (6j0.org identity; see signin.js) ----------
+// Only one screen shows at a time: loading, sign-in, "this list is private" (signed in, but not in the server's
+// ALLOWED_SUBS, so feedback only), or the app itself.
+function showOnly(id) {
+  $("#loading").hidden = true;
+  for (const v of ["signin", "denied", ...VIEWS]) $(`#view-${v}`).hidden = `view-${v}` !== id;
+}
+
+function showSignIn(error = "") {
+  state.me = null;
+  $(".tabs").hidden = true;
+  $("#feedback-btn").hidden = true;
+  $("#signout-btn").hidden = true;
+  for (const d of document.querySelectorAll("dialog[open]")) d.close();
+  stopScanner();
+  $("#signin-error").textContent = error;
+  $("#signin-error").hidden = !error;
+  showOnly("view-signin");
+}
+
+function showDenied() {
+  $("#my-id").textContent = state.me.id;
+  $("#denied-feedback").replaceChildren(feedbackElement());
+  showOnly("view-denied");
+}
+
+async function signIn(button) {
+  button.disabled = true;
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok) throw new Error("Can't reach the shopping list server.");
+    await startIdSignIn(await res.json());
+  } catch (e) {
+    button.disabled = false;
+    showSignIn(e.message || "Couldn't start sign-in.");
+  }
+}
+
+async function signOut() {
+  try { await fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch {}
+  location.replace(location.pathname);
+}
+
+// Who's signed in: { allowed, id, isAdmin }, or null when nobody is.
+async function fetchMe() {
+  const res = await fetch("/api/me");
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error(`Can't reach the shopping list server (HTTP ${res.status}).`);
+  return res.json();
+}
+
+// ---------- Feedback (feedback.js draws the page; the server's feedback.py stores it) ----------
+// Drawn once and kept, so a half-written post survives switching tabs.
+let feedbackPage = null; // { el, page }
+function feedbackElement() {
+  if (!feedbackPage) {
+    const el = document.createElement("div");
+    const page = mountFeedback(el, { buttonClass: "small", primaryClass: "primary", actionClass: "small" });
+    feedbackPage = { el, page };
+  } else {
+    feedbackPage.page.refresh();
+  }
+  return feedbackPage.el;
 }
 
 // ---------- Recipes ----------
@@ -394,6 +464,30 @@ $("#confirm").addEventListener("close", () => {
 
 // ---------- Boot ----------
 async function boot() {
+  $("#signin-btn").addEventListener("click", (e) => signIn(e.currentTarget));
+  $("#signout-btn").addEventListener("click", signOut);
+  $("#feedback-btn").addEventListener("click", () => showView("feedback"));
+  $("#copy-id").addEventListener("click", () => guard(async () => {
+    await navigator.clipboard.writeText(state.me.id);
+    toast("Copied your ID");
+  }));
+
+  let signInError = "";
+  if (hasIdCallback()) {
+    try { await finishIdSignIn(); } catch (e) { signInError = e.message; }
+  }
+  const me = await fetchMe();
+  if (!me) return showSignIn(signInError);
+  if (signInError) toast(signInError); // e.g. a stale sign-in link, while an earlier session is still good
+  state.me = me;
+  $("#signout-btn").hidden = false;
+  if (!me.allowed) return showDenied();
+  $(".tabs").hidden = false;
+  $("#feedback-btn").hidden = false;
+  await startList();
+}
+
+async function startList() {
   const meta = await api("GET", "/api/sections");
   state.sections = meta.sections;
   state.pantry = meta.pantry;
@@ -417,7 +511,8 @@ async function boot() {
 
   await refresh();
   const hash = location.hash.slice(1);
-  showView(["pantry", "recipes"].includes(hash) ? hash : "list");
+  $("#loading").hidden = true;
+  showView(VIEWS.includes(hash) ? hash : "list");
 
   $("#clear-checked").addEventListener("click", () => guard(async () => {
     const { deleted } = await api("POST", "/api/items/clear-checked");
@@ -439,9 +534,10 @@ async function boot() {
 
   // Keep multiple phones in sync when the tab regains focus.
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden || state.editing != null) return;
+    if (document.hidden || state.editing != null || !state.me) return;
     guard(refresh);
     if (state.view === "recipes") guard(loadRecipes);
+    if (state.view === "feedback") feedbackPage?.page.refresh();
   });
 }
 
