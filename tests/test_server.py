@@ -97,7 +97,7 @@ class ServerTest(unittest.TestCase):
         status, body, res = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn('type="module" src="app.js"', body)
-        for f in ("/feedback.js", "/signin.js", "/app.js"):
+        for f in ("/feedback.js", "/signin.js", "/app.js", "/hotdog.js"):
             self.assertEqual(self.request("GET", f)[0], 200, f)
         self.assertEqual(self.request("GET", "/api/config")[1], {"idOrigin": self.id.origin, "idApp": APP})
 

@@ -1,11 +1,13 @@
 import { mountFeedback } from "./feedback.js";
 import { finishIdSignIn, hasIdCallback, startIdSignIn } from "./signin.js";
+import { startHotDogMan } from "./hotdog.js";
 
 const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js";
 
 const state = {
   items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list", me: null,
   ingredients: new Map(), // folded name -> TheMealDB ingredient name, for pantry items typed by hand
+  search: { list: "", pantry: "" }, // what's typed in each page's search box
 };
 const VIEWS = ["list", "pantry", "recipes", "feedback"];
 const $ = (sel) => document.querySelector(sel);
@@ -72,9 +74,25 @@ function groupBySection(items) {
   return groups; // server already sorted by aisle order
 }
 
+// Items whose name contains every word typed in the search box (ignoring case and punctuation), in any order.
+function searchItems(items, query) {
+  const words = fold(query).split(" ").filter(Boolean);
+  if (!words.length) return items;
+  return items.filter((i) => { const name = fold(i.name); return words.every((w) => name.includes(w)); });
+}
+
+// The empty-page message: the usual one, or "nothing matches" while searching.
+function showEmpty(id, all, shown, query, usual) {
+  const p = $(id);
+  p.hidden = shown.length > 0;
+  p.textContent = all.length ? `Nothing matches “${query.trim()}”.` : usual;
+}
+
 function render() {
-  const listItems = state.items.filter((i) => i.section !== state.pantry);
-  const pantryItems = state.items.filter((i) => i.section === state.pantry);
+  const allList = state.items.filter((i) => i.section !== state.pantry);
+  const allPantry = state.items.filter((i) => i.section === state.pantry);
+  const listItems = searchItems(allList, state.search.list);
+  const pantryItems = searchItems(allPantry, state.search.pantry);
 
   const list = $("#list");
   list.replaceChildren(
@@ -84,8 +102,8 @@ function render() {
         el("ul", { class: "items" }, items.map((i) => renderItem(i, false)))),
     ),
   );
-  $("#list-empty").hidden = listItems.length > 0;
-  $("#clear-checked").hidden = !listItems.some((i) => i.checked);
+  showEmpty("#list-empty", allList, listItems, state.search.list, "Nothing on the list. Add something above.");
+  $("#clear-checked").hidden = !allList.some((i) => i.checked); // removes every checked item, not only those shown
 
   const pantry = $("#pantry");
   pantry.replaceChildren(
@@ -94,7 +112,15 @@ function render() {
           el("ul", { class: "items" }, pantryItems.map((i) => renderItem(i, true))))
       : "",
   );
-  $("#pantry-empty").hidden = pantryItems.length > 0;
+  showEmpty("#pantry-empty", allPantry, pantryItems, state.search.pantry, "Your pantry is empty. Scan what you have.");
+}
+
+function wireSearch(input, key) {
+  input.addEventListener("input", () => { state.search[key] = input.value; render(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && input.value) { e.preventDefault(); input.value = ""; state.search[key] = ""; render(); }
+    if (e.key === "Enter") input.blur(); // closes the phone keyboard to show the results
+  });
 }
 
 function renderItem(item, inPantry) {
@@ -138,27 +164,36 @@ function renderEditForm(item) {
   const select = el("select", { name: "section", "aria-label": "Store section" });
   sectionOptions(select, { selected: item.section_auto ? "auto" : item.section, includePantry: true });
   const cancel = () => { state.editing = null; render(); };
+  const panel = el("div", { class: "suggest", role: "group", "aria-live": "polite", hidden: true });
+  const save = (name) => guard(async () => {
+    await api("PUT", `/api/items/${item.id}`, {
+      name,
+      quantity: form.quantity.value,
+      section: form.section.value,
+    });
+    state.editing = null;
+    await refresh();
+  });
   const form = el("form", {
     class: "edit-form",
     autocomplete: "off",
     onsubmit: (e) => {
       e.preventDefault();
-      const f = new FormData(form);
-      guard(async () => {
-        await api("PUT", `/api/items/${item.id}`, {
-          name: f.get("name"),
-          quantity: f.get("quantity"),
-          section: f.get("section"),
-        });
-        state.editing = null;
-        await refresh();
-      });
+      const typed = form.name.value.trim();
+      if (!typed) return;
+      // Only a new name is matched, so changing the quantity of a scanned "Brand Product" doesn't ask about it.
+      if (typed === item.name) return save(typed);
+      matchName(typed, panel, save, "Save");
     },
     onkeydown: (e) => { if (e.key === "Escape") cancel(); },
   },
-    el("input", { name: "name", value: item.name, required: true, maxlength: 200, "aria-label": "Item name" }),
+    el("input", {
+      name: "name", value: item.name, required: true, maxlength: 200, "aria-label": "Item name", list: "ingredients",
+      oninput: () => hidePanel(panel),
+    }),
     el("input", { name: "quantity", value: item.quantity, maxlength: 200, placeholder: "Quantity", "aria-label": "Quantity" }),
     select,
+    panel,
     el("div", { class: "row-actions" },
       el("button", { type: "button", class: "ghost", onclick: cancel }, "Cancel"),
       el("button", { type: "submit", class: "primary" }, "Save")),
@@ -431,14 +466,31 @@ function closestIngredients(name, limit = 3) {
   return scored.sort((a, b) => b.score - a.score).slice(0, limit).map((s) => s.display);
 }
 
+const hidePanel = (panel) => { panel.hidden = true; panel.replaceChildren(); };
+
+// Calls save(name) with the list's spelling when the typed name is on it (or when the list didn't load, as typed, so
+// nothing is blocked). Otherwise fills panel with the closest names and "<verb> anyway", each of which calls save.
+function matchName(typed, panel, save, verb = "Add") {
+  if (!state.ingredients.size) return save(typed);
+  const exact = state.ingredients.get(fold(typed));
+  if (exact) return save(exact);
+  const close = closestIngredients(typed);
+  panel.replaceChildren(
+    el("p", {}, close.length ? `“${typed}” isn't in the food list. Did you mean:` : `“${typed}” isn't in the food list.`),
+    ...close.map((n) => el("button", { type: "button", class: "small", onclick: () => save(n) }, n)),
+    el("button", { type: "button", class: "small ghost", onclick: () => save(typed) }, `${verb} “${typed}” anyway`),
+  );
+  panel.hidden = false;
+  panel.querySelector("button").focus();
+}
+
 // save(name) adds the item with the form's other fields; panel shows the "isn't in the food list" choices.
 function wireAddForm(form, panel, save) {
-  const hidePanel = () => { panel.hidden = true; panel.replaceChildren(); };
-  form.name.addEventListener("input", hidePanel);
+  form.name.addEventListener("input", () => hidePanel(panel));
 
   const add = (name) => guard(async () => {
     await save(name);
-    hidePanel();
+    hidePanel(panel);
     form.reset();
     if (form.section) form.section.value = "auto";
     form.name.focus();
@@ -447,19 +499,7 @@ function wireAddForm(form, panel, save) {
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const typed = form.name.value.trim();
-    if (!typed) return;
-    // Without the list (it didn't load), add as typed rather than block.
-    if (!state.ingredients.size) return add(typed);
-    const exact = state.ingredients.get(fold(typed));
-    if (exact) return add(exact);
-    const close = closestIngredients(typed);
-    panel.replaceChildren(
-      el("p", {}, close.length ? `“${typed}” isn't in the food list. Did you mean:` : `“${typed}” isn't in the food list.`),
-      ...close.map((n) => el("button", { type: "button", class: "small", onclick: () => add(n) }, n)),
-      el("button", { type: "button", class: "small ghost", onclick: () => add(typed) }, `Add “${typed}” anyway`),
-    );
-    panel.hidden = false;
-    panel.querySelector("button").focus();
+    if (typed) matchName(typed, panel, add);
   });
 }
 
@@ -713,6 +753,8 @@ async function startList() {
   state.pantry = meta.pantry;
   sectionOptions($("#add-form").section);
 
+  wireSearch($("#list-search"), "list");
+  wireSearch($("#pantry-search"), "pantry");
   wireAddForm($("#add-form"), $("#list-suggest"), async (name) => {
     const form = $("#add-form");
     await api("POST", "/api/items", { name, quantity: form.quantity.value, section: form.section.value });
@@ -776,4 +818,5 @@ async function startList() {
   });
 }
 
+startHotDogMan();
 guard(boot);

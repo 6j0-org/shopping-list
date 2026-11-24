@@ -40,6 +40,7 @@
 
     <!-- Shopping list -->
     <section id="view-list" class="view" hidden>
+      <input type="search" id="list-search" class="search" placeholder="Search the list" aria-label="Search the list" autocomplete="off" enterkeyhint="search">
       <form id="add-form" class="add-form" autocomplete="off">
         <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name" list="ingredients">
         <input name="quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
@@ -57,6 +58,7 @@
 
     <!-- Pantry -->
     <section id="view-pantry" class="view" hidden>
+      <input type="search" id="pantry-search" class="search" placeholder="Search the pantry" aria-label="Search the pantry" autocomplete="off" enterkeyhint="search">
       <div class="scan-bar">
         <button id="scan-btn" class="primary big">📷 Scan barcode</button>
         <form id="code-form" class="code-form" autocomplete="off">
