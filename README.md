@@ -7,20 +7,25 @@ A small self-hosted shopping list. Python 3's standard library, plus [`cryptogra
 - Items are grouped and sorted by store aisle (Produce → Bakery → Deli → Meat → Dairy → Frozen → … → Pet). The aisle is guessed from the name (`sections.py`); you can override it per item, and an override sticks when you rename the item.
 - **Pantry** tab: scan barcodes with your phone camera to record what you already have. The 🛒 button on a pantry item adds it to the shopping list.
 - **Recipes** tab: recipes you can make from your pantry, with the fewest missing ingredients first. Choose how many missing ingredients are OK (0–3 or any). Open a recipe to see its ingredients and instructions, and use "Add N missing to list" to put what you lack on the shopping list.
-- **Accounts:** people sign in with an anonymous identity from a [6j0.org identity server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one passkey (or username and password) covers every 6j0.org app. There's one list and pantry, shared by the identities in `ALLOWED_SUBS` (a household, say). Anyone else who signs in sees "This list is private" with their ID to send you, and can use Feedback.
+- **Accounts:** people sign in with an anonymous identity from a [6j0.org identity server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one passkey (or username and password) covers every 6j0.org app. Everyone who signs in gets their own list and pantry, empty to start.
+- **Share** button: make an invite link and send it to someone (a household, say). When they open it and choose Join, you share one list and pantry. Each link works once, for 7 days. Anyone on a list can invite people, take people off it, or leave; whoever is taken off or leaves starts over with an empty list.
 - **Feedback** button: signed-in people read everyone's feedback, post their own, and reply in each post's thread (see [Feedback](#feedback)).
 
 ## Run
 
 ```sh
 pip install -r requirements.txt   # cryptography, for Ed25519 sign-in tokens
-ID_ORIGIN=https://id.6j0.org ALLOWED_SUBS=<your 6j0.org ID> python3 server.py   # http://localhost:8000
+ID_ORIGIN=https://id.6j0.org python3 server.py   # http://localhost:8000
 ```
 
 The identity server must list this app in its `APPS`, with the origin people open it at (e.g.
-`APPS=shopping-list=https://shopping-list.6j0.org`), since it only sends sign-ins back to that origin. To find your
-6j0.org ID, start with `ALLOWED_SUBS` empty and sign in: the "This list is private" page shows it (and the server logs
-it). Then add it and restart.
+`APPS=shopping-list=https://shopping-list.6j0.org`), since it only sends sign-ins back to that origin.
+
+**Upgrading from one shared list.** Before lists were per person, there was one list, shared by the identities in
+`ALLOWED_SUBS`. On startup, the server puts the items that belong to no list, and the identities in `ALLOWED_SUBS`
+that don't have a list yet, on one list together, and logs what it did. Without `ALLOWED_SUBS`, those items stay put
+(and the server says so at startup), and everyone who signs in starts with an empty list. Once it has run, you can
+remove `ALLOWED_SUBS`.
 
 Data lives in `shopping.db` (SQLite) next to `server.py`, and feedback in `feedback.jsonl` next to the database. Use `--db PATH` to change it.
 
@@ -36,8 +41,8 @@ Every option can also be set with an environment variable (`python3 server.py --
 | `ID_ORIGIN` | required | The 6j0.org identity server, e.g. `https://id.6j0.org` |
 | `ID_APP` | `shopping-list` | This app's name in the identity server's `APPS`. Never rename it. |
 | `ID_JWKS_URL` | `ID_ORIGIN/.well-known/jwks.json` | Where to fetch the identity server's public keys (e.g. an in-cluster Service URL) |
-| `ALLOWED_SUBS` | empty | The 6j0.org identities (their `sub`), comma- or space-separated, that share the list. Empty: nobody can use the list. |
-| `ADMIN_SUB` | unset | The 6j0.org identity that can close and delete anyone's feedback, and whose posts and replies are labeled "Developer". It isn't given the list: add it to `ALLOWED_SUBS` too. |
+| `ALLOWED_SUBS` | empty | Only for [upgrading from one shared list](#run): the 6j0.org identities (their `sub`), comma- or space-separated, that shared it. |
+| `ADMIN_SUB` | unset | The 6j0.org identity that can close and delete anyone's feedback, and whose posts and replies are labeled "Developer". |
 | `ORIGIN` | unset | This app's public origin, e.g. `https://shopping-list.6j0.org`. `https:` turns on `Secure` cookies. |
 
 To try it locally, run the identity server on `localhost` and this app on `127.0.0.1` (cookies ignore the port, so
@@ -56,18 +61,16 @@ ID_ORIGIN=http://localhost:4000 python3 server.py   # open http://127.0.0.1:8000
    `ID_ORIGIN/authorize?app=shopping-list&nonce=…&epk=…`.
 2. The identity server signs the person in and sends the browser back to `/` with a signed token (an Ed25519 JWT)
    in the URL fragment, which never reaches a server. It also sends this app's encryption key, encrypted to the
-   ECDH key. Other 6j0.org apps encrypt their data with it; the list is shared and isn't end-to-end encrypted, so the
+   ECDH key. Other 6j0.org apps encrypt their data with it; a list can be shared and isn't end-to-end encrypted, so the
    page ignores it (and never kept the ECDH private key).
 3. The page checks the nonce and posts the token to `/api/id/login`. `idtoken.py` verifies the signature against
    the identity server's JWKS, plus `iss`, `aud`, `exp`, `nonce`, and one-time use (`jti`). The server then finds
-   or creates the account for the token's `sub` and sets a session cookie (`HttpOnly`, `SameSite=Lax`, 30 days;
-   the database stores only its SHA-256).
-4. Whether the identity can use the list is checked on every request against `ALLOWED_SUBS`, so removing someone
-   takes effect at the next restart.
+   or creates the account for the token's `sub` (with a new, empty list) and sets a session cookie (`HttpOnly`,
+   `SameSite=Lax`, 30 days; the database stores only its SHA-256).
 
 Deleting an identity at `id.6j0.org` makes the identity server `POST` a signed notice to `/api/id/deleted`. The
-server then deletes that account, its sessions, and everything it wrote in Feedback. The list itself is shared, so
-items that identity added stay.
+server then deletes that account, its sessions, and everything it wrote in Feedback. If nobody else is on its list,
+the list and its items go too; otherwise they stay with the others.
 
 Requests marked `Sec-Fetch-Site: cross-site` that change data are refused.
 
@@ -99,7 +102,8 @@ python3 -m unittest discover -s tests -t .
 
 `tests/test_feedback.py` tests `feedback.py` on its own (a port of the Node apps' feedback test, plus checks that it
 reads files the Node version wrote). `tests/test_idtoken.py` and `tests/test_server.py` run against a stand-in
-identity server (`tests/fakeid.py`) that signs tokens like the real one: sign-in, the allowlist, feedback, identity
+identity server (`tests/fakeid.py`) that signs tokens like the real one: sign-in, a list per person, invites, the
+upgrade from one shared list, feedback, identity
 deletion, and refused tokens.
 
 ### Container
@@ -109,7 +113,7 @@ The image runs as an unprivileged user (uid 10001), listens on port 8000, and ke
 ```sh
 docker build -t ghcr.io/6j0-org/shopping-list:0.1.0 .
 docker run --rm -p 8000:8000 -v shopping-data:/data \
-  -e ID_ORIGIN=https://id.6j0.org -e ORIGIN=https://shopping-list.6j0.org -e ALLOWED_SUBS=<your 6j0.org ID> \
+  -e ID_ORIGIN=https://id.6j0.org -e ORIGIN=https://shopping-list.6j0.org \
   ghcr.io/6j0-org/shopping-list:0.1.0
 ```
 
@@ -173,16 +177,19 @@ TheMealDB's terms say the test key is for development and education. If you depl
 ## API
 
 Everything except `/api/config`, `/api/id/login`, `/api/id/deleted`, and `/api/logout` needs a session; without one it
-answers 401. The list routes (items, sections, barcodes, recipes) also need an identity in `ALLOWED_SUBS`, and answer
-403 for anyone else.
+answers 401. Items and recipes are those of the signed-in person's list; an item on another list answers 404.
 
 | Method | Path | Body / notes |
 |---|---|---|
 | GET | `/api/config` | `{idOrigin, idApp}` |
-| POST | `/api/id/login` | `{token, nonce}` → `{allowed}` and sets the session cookie |
+| POST | `/api/id/login` | `{token, nonce}` → `{ok}` and sets the session cookie |
 | POST | `/api/id/deleted` | `{token}`, a signed deletion notice from the identity server; erases that account |
 | POST | `/api/logout` | Ends the session |
-| GET | `/api/me` | `{allowed, id, isAdmin}`; `id` is the identity's `sub` |
+| GET | `/api/me` | `{isAdmin}` |
+| GET | `/api/list` | `{members: [{id, you}]}`, the people on your list; `id` is the account's random public ID, never its `sub` |
+| POST | `/api/list/invites` | → `{code, days}`; the invite link is `/#join=<code>`, single use |
+| POST | `/api/list/join` | `{code}` → `{members, moved}`. If you were alone on your list, its `moved` items come along and it's deleted |
+| DELETE | `/api/list/members/:id` | Takes that person (or, with your own `id`, you) off the list, onto a new empty one → `{members}` of your list |
 | GET | `/api/items` | All items, sorted by aisle |
 | POST | `/api/items` | `{name, quantity?, section?, barcode?}`. `section` is omitted or `"auto"` to guess it |
 | PUT/PATCH | `/api/items/:id` | Any of `{name, quantity, section, checked}` |

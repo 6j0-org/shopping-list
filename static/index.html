@@ -11,6 +11,7 @@
   <header class="topbar">
     <div class="topbar-row">
       <h1>Shopping List</h1>
+      <button id="share-btn" class="small ghost" hidden>Share</button>
       <button id="feedback-btn" class="small ghost" aria-pressed="false" hidden>Feedback</button>
       <button id="signout-btn" class="small ghost" hidden>Sign out</button>
     </div>
@@ -32,17 +33,6 @@
         <button id="signin-btn" class="primary big">Sign in with 6j0.org</button>
         <p id="signin-error" class="error" role="alert" hidden></p>
       </div>
-    </section>
-
-    <!-- Signed in, but not in ALLOWED_SUBS: feedback only -->
-    <section id="view-denied" class="view" hidden>
-      <div class="card">
-        <h2>This list is private</h2>
-        <p>You're signed in, but your 6j0.org identity isn't on this shopping list. To join, send the list's owner your ID:</p>
-        <p class="id-row"><code id="my-id"></code> <button id="copy-id" class="small">Copy</button></p>
-        <p class="muted">You can still read and post feedback below.</p>
-      </div>
-      <div id="denied-feedback"></div>
     </section>
 
     <!-- Feedback -->
@@ -123,6 +113,37 @@
         <button value="cancel" formnovalidate class="ghost">Cancel</button>
         <button value="add">Add</button>
         <button value="add-next" class="primary">Add &amp; scan next</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Share the list -->
+  <dialog id="share" class="sheet">
+    <h2>Share this list</h2>
+    <p class="muted">Everyone on it sees and changes the same list, pantry, and recipes.</p>
+    <ul id="members" class="members"></ul>
+    <div class="row-actions start">
+      <button id="invite-btn" class="primary">Make an invite link</button>
+    </div>
+    <div id="invite" hidden>
+      <p class="muted small">Send this link to the person you want to share with. It works once, for <span id="invite-days">7</span> days.</p>
+      <p class="id-row"><code id="invite-link"></code> <button id="copy-invite" class="small">Copy</button></p>
+    </div>
+    <div class="row-actions">
+      <button id="leave-btn" class="ghost" hidden>Leave this list</button>
+      <button id="share-close">Done</button>
+    </div>
+  </dialog>
+
+  <!-- Accept an invite -->
+  <dialog id="join" class="sheet">
+    <form method="dialog">
+      <h2>Join a shared list?</h2>
+      <p>Someone invited you to share their shopping list.</p>
+      <p id="join-note" class="muted"></p>
+      <div class="row-actions">
+        <button value="cancel" class="ghost">Not now</button>
+        <button value="join" class="primary">Join</button>
       </div>
     </form>
   </dialog>

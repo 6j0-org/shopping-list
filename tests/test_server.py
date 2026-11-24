@@ -1,9 +1,10 @@
-"""The server end to end, in-process, against a fake identity server: sign-in, sessions, the ALLOWED_SUBS allowlist,
-feedback for anyone signed in, identity deletion, cross-site refusal, and sign-out."""
+"""The server end to end, in-process, against a fake identity server: sign-in, sessions, a list per person, sharing a
+list by invite, upgrading from one shared list, feedback, identity deletion, cross-site refusal, and sign-out."""
 
 import http.client
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -31,7 +32,7 @@ class ServerTest(unittest.TestCase):
         cls.id = FakeIdServer()
         server._auth.update(
             id_origin=cls.id.origin, id_app=APP, jwks_url=cls.id.jwks_url,
-            allowed_subs=frozenset({"owner-sub", "partner-sub"}), admin_sub="owner-sub", secure_cookie="",
+            admin_sub="owner-sub", secure_cookie="",
         )
         server.init_db(os.path.join(cls.tmp.name, "shopping.db"))
         cls.feedback_file = Path(cls.tmp.name, "feedback.jsonl")
@@ -95,32 +96,103 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(status, 401)
         self.assertEqual(self.request("GET", "/api/items", sid="not-a-session")[0], 401)
 
-    def test_allowed_identity_uses_the_shared_list(self):
-        owner, body = self.sign_in("owner-sub")
-        self.assertEqual(body, {"allowed": True})
-        self.assertEqual(self.request("GET", "/api/me", sid=owner)[1], {"allowed": True, "id": "owner-sub", "isAdmin": True})
-        status, item, _ = self.request("POST", "/api/items", {"name": "Bananas", "quantity": "6"}, sid=owner)
-        self.assertEqual(status, 201)
-        partner, _ = self.sign_in("partner-sub")
-        names = [i["name"] for i in self.request("GET", "/api/items", sid=partner)[1]]
-        self.assertIn("Bananas", names, "both allowed identities share one list")
-        self.assertEqual(self.request("PATCH", f"/api/items/{item['id']}", {"checked": True}, sid=partner)[1]["checked"], True)
-        self.assertEqual(self.request("DELETE", f"/api/items/{item['id']}", sid=partner)[0], 204)
-        self.assertEqual(self.request("GET", "/api/sections", sid=partner)[0], 200)
+    def names(self, sid, pantry=False):
+        items = self.request("GET", "/api/items", sid=sid)[1]
+        return sorted(i["name"] for i in items if (i["section"] == "Pantry") == pantry)
 
-    def test_other_identities_get_feedback_only(self):
-        stranger, body = self.sign_in("stranger-sub")
-        self.assertEqual(body, {"allowed": False})
-        self.assertEqual(self.request("GET", "/api/me", sid=stranger)[1], {"allowed": False, "id": "stranger-sub", "isAdmin": False})
-        for method, path in [("GET", "/api/items"), ("GET", "/api/sections"), ("GET", "/api/barcode/012345678905"),
-                             ("POST", "/api/items"), ("POST", "/api/items/clear-checked"), ("PUT", "/api/items/1")]:
-            with self.subTest(path=path):
-                status, body, _ = self.request(method, path, {"name": "x"} if method != "GET" else None, sid=stranger)
-                self.assertEqual(status, 403)
-                self.assertIn("private", body["error"])
-        status, post, _ = self.request("POST", "/api/feedback", {"body": "Can I join?"}, sid=stranger)
-        self.assertEqual(status, 201)
-        self.assertTrue(post["mine"])
+    def add(self, sid, name, **extra):
+        status, item, _ = self.request("POST", "/api/items", {"name": name, **extra}, sid=sid)
+        self.assertEqual(status, 201, item)
+        return item
+
+    def invite(self, sid):
+        status, body, _ = self.request("POST", "/api/list/invites", {}, sid=sid)
+        self.assertEqual((status, body["days"]), (201, 7))
+        return body["code"]
+
+    def test_everyone_starts_with_their_own_empty_list(self):
+        alice, body = self.sign_in("alice-sub")
+        self.assertEqual(body, {"ok": True})
+        self.assertEqual(self.request("GET", "/api/me", sid=alice)[1], {"isAdmin": False})
+        self.assertEqual(self.names(alice), [])
+        self.assertEqual(self.request("GET", "/api/sections", sid=alice)[0], 200)
+        item = self.add(alice, "Bananas", quantity="6")
+        self.assertEqual(self.request("PATCH", f"/api/items/{item['id']}", {"checked": True}, sid=alice)[1]["checked"], True)
+
+        bob, _ = self.sign_in("bob-sub")
+        self.assertEqual(self.names(bob), [], "a new identity gets a new list, not someone else's")
+        for method, body in [("PUT", {"name": "Mine now"}), ("DELETE", None)]:
+            with self.subTest(method=method):
+                self.assertEqual(self.request(method, f"/api/items/{item['id']}", body, sid=bob)[0], 404)
+        self.assertEqual(self.request("POST", "/api/items/clear-checked", {}, sid=bob)[1], {"deleted": 0})
+        self.assertEqual(self.names(alice), ["Bananas"])
+        members = self.request("GET", "/api/list", sid=bob)[1]["members"]
+        self.assertEqual(len(members), 1)
+        self.assertTrue(members[0]["you"])
+        self.assertNotIn("bob-sub", json.dumps(members), "subs are never shown")
+
+        alice_again, _ = self.sign_in("alice-sub")
+        self.assertEqual(self.names(alice_again), ["Bananas"], "signing in again keeps your list")
+
+    def test_sharing_a_list_by_invite(self):
+        host, _ = self.sign_in("host-sub")
+        self.add(host, "Milk")
+        guest, _ = self.sign_in("guest-sub")
+        self.add(guest, "Eggs")
+        self.add(guest, "Rice", section="Pantry")
+
+        code = self.invite(host)
+        status, body, _ = self.request("POST", "/api/list/join", {"code": code}, sid=guest)
+        self.assertEqual((status, body["moved"], len(body["members"])), (200, 2, 2))
+        self.assertEqual(self.names(host), ["Eggs", "Milk"], "a guest alone on their list brings its items")
+        self.assertEqual(self.names(host, pantry=True), ["Rice"])
+        self.assertEqual(self.names(guest), ["Eggs", "Milk"])
+        egg = next(i for i in self.request("GET", "/api/items", sid=host)[1] if i["name"] == "Eggs")
+        self.assertEqual(self.request("DELETE", f"/api/items/{egg['id']}", sid=host)[0], 204)
+
+        self.assertEqual(self.request("POST", "/api/list/join", {"code": code}, sid=guest)[0], 404, "single use")
+        self.assertEqual(self.request("POST", "/api/list/join", {"code": self.invite(guest)}, sid=host)[0], 400,
+                         "already on it")
+        self.assertEqual(self.request("POST", "/api/list/join", {}, sid=guest)[0], 400)
+
+        # A third person joins and then leaves. Leaving someone else's shared list takes nothing with you.
+        third, _ = self.sign_in("third-sub")
+        self.request("POST", "/api/list/join", {"code": self.invite(host)}, sid=third)
+        members = self.request("GET", "/api/list", sid=third)[1]["members"]
+        self.assertEqual(len(members), 3)
+        me = next(m for m in members if m["you"])
+        status, body, _ = self.request("DELETE", f"/api/list/members/{me['id']}", sid=third)
+        self.assertEqual((status, len(body["members"])), (200, 1))
+        self.assertEqual(self.names(third), [])
+        self.assertEqual(self.names(host), ["Milk"])
+
+        # Taking someone off: they start over, and the list stays with the rest.
+        guest_id = next(m["id"] for m in self.request("GET", "/api/list", sid=host)[1]["members"] if not m["you"])
+        self.assertEqual(self.request("DELETE", f"/api/list/members/{guest_id}", sid=third)[0], 404, "not on your list")
+        status, body, _ = self.request("DELETE", f"/api/list/members/{guest_id}", sid=host)
+        self.assertEqual((status, len(body["members"])), (200, 1))
+        self.assertEqual(self.names(guest), [])
+        self.assertEqual(self.names(host), ["Milk"])
+        host_id = body["members"][0]["id"]
+        self.assertEqual(self.request("DELETE", f"/api/list/members/{host_id}", sid=host)[0], 400, "the only one")
+
+    def test_expired_invites_are_refused(self):
+        host, _ = self.sign_in("expiry-host")
+        guest, _ = self.sign_in("expiry-guest")
+        code = self.invite(host)
+        with server._db_lock:
+            server._db.execute("UPDATE invites SET created = created - ?", (server.INVITE_MS,))
+            server._db.commit()
+        status, body, _ = self.request("POST", "/api/list/join", {"code": code}, sid=guest)
+        self.assertEqual(status, 404)
+        self.assertIn("expired", body["error"])
+
+    def test_cross_site_joins_are_refused(self):
+        host, _ = self.sign_in("xs-host")
+        guest, _ = self.sign_in("xs-guest")
+        status, _, _ = self.request("POST", "/api/list/join", {"code": self.invite(host)}, sid=guest,
+                                    headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(status, 403)
 
     def test_feedback_routes(self):
         tester, _ = self.sign_in("tester-sub")
@@ -182,6 +254,9 @@ class ServerTest(unittest.TestCase):
         gone, _ = self.sign_in("deleted-sub")
         status, post, _ = self.request("POST", "/api/feedback", {"body": "Delete me later"}, sid=gone)
         self.assertEqual(status, 201)
+        self.add(gone, "Only mine")
+        with server._db_lock:
+            list_id = server._db.execute("SELECT list_id FROM users WHERE sub = 'deleted-sub'").fetchone()[0]
         # A sign-in token can't stand in for a deletion notice, and a bad one is refused.
         self.assertEqual(self.request("POST", "/api/id/deleted", {"token": self.id.sign_in_token("deleted-sub", APP, NONCE)})[0], 401)
         self.assertEqual(self.request("POST", "/api/id/deleted", {"token": "nope"})[0], 401)
@@ -193,6 +268,9 @@ class ServerTest(unittest.TestCase):
         owner, _ = self.sign_in("owner-sub")
         self.assertEqual(self.request("GET", f"/api/feedback/{post['id']}", sid=owner)[0], 404, "its feedback is erased")
         self.assertIn('"erase"', self.feedback_file.read_text())
+        with server._db_lock:
+            left = server._db.execute("SELECT COUNT(*) FROM items WHERE list_id = ?", (list_id,)).fetchone()[0]
+        self.assertEqual(left, 0, "a list nobody else is on goes too")
         # Unknown identities are fine too, so the identity server stops retrying.
         self.assertEqual(self.request("POST", "/api/id/deleted", {"token": self.id.deletion_token("never-here", APP)})[0], 200)
 
@@ -209,6 +287,47 @@ class ServerTest(unittest.TestCase):
             hashes = [r[0] for r in server._db.execute("SELECT token_hash FROM sessions")]
         self.assertNotIn(sid, hashes)
         self.assertIn(server._token_hash(sid), hashes)
+
+
+class UpgradeTest(unittest.TestCase):
+    """A database from when there was one list, shared by ALLOWED_SUBS."""
+
+    def test_unowned_items_go_to_allowed_subs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "old.db")
+            old = sqlite3.connect(path)
+            old.executescript("""
+                CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    quantity TEXT NOT NULL DEFAULT '', section TEXT NOT NULL, section_auto INTEGER NOT NULL DEFAULT 1,
+                    checked INTEGER NOT NULL DEFAULT 0, barcode TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+                CREATE TABLE users (id INTEGER PRIMARY KEY, sub TEXT NOT NULL UNIQUE, guid TEXT NOT NULL UNIQUE,
+                    created INTEGER NOT NULL);
+                INSERT INTO items (name, section) VALUES ('Coffee', 'Pantry'), ('Bread', 'Bakery');
+                INSERT INTO users (sub, guid, created) VALUES ('signed-in-before', 'g1', 1), ('outsider', 'g2', 1);
+            """)
+            old.commit()
+            old.close()
+            saved = server._db
+            try:
+                server.init_db(path)
+                self.assertIn("belong to no list", server.claim_unowned(frozenset()), "nothing moves without ALLOWED_SUBS")
+                self.assertIn("2 unowned items and 2 identities",
+                              server.claim_unowned(frozenset({"signed-in-before", "not-yet"})))
+                self.assertIsNone(server.claim_unowned(frozenset({"signed-in-before", "not-yet"})), "runs once")
+                rows = dict(server._db.execute("SELECT sub, list_id FROM users").fetchall())
+                self.assertEqual(rows["signed-in-before"], rows["not-yet"])
+                self.assertIsNone(rows["outsider"])
+                listed = server.list_items(rows["not-yet"])
+                self.assertEqual(sorted(i["name"] for i in listed), ["Bread", "Coffee"])
+                # Someone who isn't in ALLOWED_SUBS gets a new list of their own.
+                server.account_for("outsider")
+                outsider = server._db.execute("SELECT list_id FROM users WHERE sub = 'outsider'").fetchone()[0]
+                self.assertNotEqual(outsider, rows["not-yet"])
+                self.assertEqual(server.list_items(outsider), [])
+            finally:
+                server._db.close()
+                server._db = saved
 
 
 class StartupTest(unittest.TestCase):

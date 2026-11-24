@@ -7,7 +7,7 @@
 // 3. finishIdSignIn: check the nonce and have the server verify the token, which starts a session.
 //
 // The identity server always hands over this app's encryption key (`key`, encrypted to the ECDH key), since other
-// 6j0.org apps encrypt their data with it. The shopping list is shared and isn't end-to-end encrypted, so it ignores
+// 6j0.org apps encrypt their data with it. A shopping list can be shared and isn't end-to-end encrypted, so it ignores
 // the key and throws the private key away right after making it: only the nonce is kept.
 
 const PENDING = "shopping-list:id-pending";
@@ -25,7 +25,7 @@ export async function startIdSignIn({ idOrigin, idApp }) {
   location.assign(`${idOrigin}/authorize?${new URLSearchParams({ app: idApp, nonce, epk: `${x}.${y}` })}`);
 }
 
-// Returns the server's answer, { allowed }. Throws with a message fit to show people.
+// Returns the server's answer, { ok }. Throws with a message fit to show people.
 export async function finishIdSignIn() {
   const frag = new URLSearchParams(location.hash.slice(1));
   history.replaceState(null, "", location.pathname + location.search); // drop the token from the address bar

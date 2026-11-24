@@ -178,29 +178,23 @@ function showView(view) {
 }
 
 // ---------- Sign-in (6j0.org identity; see signin.js) ----------
-// Only one screen shows at a time: loading, sign-in, "this list is private" (signed in, but not in the server's
-// ALLOWED_SUBS, so feedback only), or the app itself.
+// Only one screen shows at a time: loading, sign-in, or the app itself.
 function showOnly(id) {
   $("#loading").hidden = true;
-  for (const v of ["signin", "denied", ...VIEWS]) $(`#view-${v}`).hidden = `view-${v}` !== id;
+  for (const v of ["signin", ...VIEWS]) $(`#view-${v}`).hidden = `view-${v}` !== id;
 }
 
 function showSignIn(error = "") {
   state.me = null;
   $(".tabs").hidden = true;
   $("#feedback-btn").hidden = true;
+  $("#share-btn").hidden = true;
   $("#signout-btn").hidden = true;
   for (const d of document.querySelectorAll("dialog[open]")) d.close();
   stopScanner();
   $("#signin-error").textContent = error;
   $("#signin-error").hidden = !error;
   showOnly("view-signin");
-}
-
-function showDenied() {
-  $("#my-id").textContent = state.me.id;
-  $("#denied-feedback").replaceChildren(feedbackElement());
-  showOnly("view-denied");
 }
 
 async function signIn(button) {
@@ -220,12 +214,91 @@ async function signOut() {
   location.replace(location.pathname);
 }
 
-// Who's signed in: { allowed, id, isAdmin }, or null when nobody is.
+// Who's signed in: { isAdmin }, or null when nobody is.
 async function fetchMe() {
   const res = await fetch("/api/me");
   if (res.status === 401) return null;
   if (!res.ok) throw new Error(`Can't reach the shopping list server (HTTP ${res.status}).`);
   return res.json();
+}
+
+// ---------- Sharing ----------
+// An invite link is /#join=<code>. The code is kept in sessionStorage so it survives the trip to the identity server
+// when the person isn't signed in yet.
+const JOIN_KEY = "shopping-list:join";
+
+function takeJoinCode() {
+  const m = location.hash.match(/^#join=([\w-]+)$/);
+  if (m) {
+    sessionStorage.setItem(JOIN_KEY, m[1]);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+}
+
+async function offerJoin() {
+  const code = sessionStorage.getItem(JOIN_KEY);
+  if (!code) return;
+  sessionStorage.removeItem(JOIN_KEY);
+  const { members } = await api("GET", "/api/list");
+  const dialog = $("#join");
+  $("#join-note").textContent = members.length > 1
+    ? "You'll leave the list you share now. It stays with the others on it."
+    : "Anything on your list and in your pantry now moves to the shared list.";
+  dialog.returnValue = "";
+  dialog.showModal();
+  await new Promise((resolve) => dialog.addEventListener("close", resolve, { once: true }));
+  if (dialog.returnValue !== "join") return;
+  const res = await api("POST", "/api/list/join", { code });
+  toast(res.moved ? `You're on the shared list now, with your ${res.moved} items` : "You're on the shared list now");
+  await refresh();
+  if (state.view === "recipes") await loadRecipes();
+}
+
+function renderMembers({ members }) {
+  const others = members.filter((m) => !m.you).length;
+  $("#members").replaceChildren(...members.map((m) =>
+    el("li", {},
+      el("span", {}, m.you ? "You" : "Someone you invited"),
+      m.you ? null : el("button", {
+        class: "small ghost",
+        onclick: () => guard(async () => {
+          if (!confirm("Take this person off the list? They'll start over with an empty list.")) return;
+          renderMembers(await api("DELETE", `/api/list/members/${m.id}`));
+        }),
+      }, "Remove"))));
+  const me = members.find((m) => m.you);
+  const leave = $("#leave-btn");
+  leave.hidden = others === 0;
+  leave.onclick = () => guard(async () => {
+    if (!confirm("Leave this list? You'll start over with an empty list, and the others keep this one.")) return;
+    renderMembers(await api("DELETE", `/api/list/members/${me.id}`));
+    $("#share").close();
+    toast("You left the list");
+    await refresh();
+  });
+}
+
+async function openShare() {
+  $("#invite").hidden = true;
+  renderMembers(await api("GET", "/api/list"));
+  $("#share").showModal();
+}
+
+function wireShare() {
+  $("#share-btn").addEventListener("click", () => guard(openShare));
+  $("#share-close").addEventListener("click", () => $("#share").close());
+  $("#invite-btn").addEventListener("click", () => guard(async () => {
+    const { code, days } = await api("POST", "/api/list/invites");
+    $("#invite-link").textContent = `${location.origin}${location.pathname}#join=${code}`;
+    $("#invite-days").textContent = days;
+    $("#invite").hidden = false;
+  }));
+  $("#copy-invite").addEventListener("click", () => guard(async () => {
+    await navigator.clipboard.writeText($("#invite-link").textContent);
+    toast("Copied the invite link");
+  }));
+  // Someone else's change shows up when the dialog closes.
+  $("#share").addEventListener("close", () => guard(refresh));
 }
 
 // ---------- Feedback (feedback.js draws the page; the server's feedback.py stores it) ----------
@@ -467,10 +540,8 @@ async function boot() {
   $("#signin-btn").addEventListener("click", (e) => signIn(e.currentTarget));
   $("#signout-btn").addEventListener("click", signOut);
   $("#feedback-btn").addEventListener("click", () => showView("feedback"));
-  $("#copy-id").addEventListener("click", () => guard(async () => {
-    await navigator.clipboard.writeText(state.me.id);
-    toast("Copied your ID");
-  }));
+  wireShare();
+  takeJoinCode();
 
   let signInError = "";
   if (hasIdCallback()) {
@@ -481,10 +552,11 @@ async function boot() {
   if (signInError) toast(signInError); // e.g. a stale sign-in link, while an earlier session is still good
   state.me = me;
   $("#signout-btn").hidden = false;
-  if (!me.allowed) return showDenied();
+  $("#share-btn").hidden = false;
   $(".tabs").hidden = false;
   $("#feedback-btn").hidden = false;
   await startList();
+  await offerJoin();
 }
 
 async function startList() {

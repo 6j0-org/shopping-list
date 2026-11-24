@@ -204,6 +204,13 @@ dialog label input { color: var(--text); font-size: 1rem; }
 .error { color: var(--danger); }
 .card .error { margin: 12px 0 0; }
 .id-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.members { list-style: none; padding: 0; margin: 8px 0 12px; }
+.members li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
+.members li:last-child { border-bottom: 1px solid var(--border); }
+.members li span { flex: 1; }
+.row-actions.start { justify-content: flex-start; }
+#invite { margin-top: 12px; }
+#share .row-actions:last-child { margin-top: 16px; }
 .id-row code {
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   padding: 4px 8px; overflow-wrap: anywhere; user-select: all;

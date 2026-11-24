@@ -35,19 +35,20 @@ STATIC = ROOT / "static"
 USER_AGENT = "ShoppingList/0.1 (self-hosted grocery list)"
 SESSION_DAYS = 30
 SESSION_MS = SESSION_DAYS * 86400 * 1000
+INVITE_DAYS = 7
+INVITE_MS = INVITE_DAYS * 86400 * 1000
 
 _db_lock = threading.Lock()
 _db = None
 _catalog = None
 _feedback = None
 
-# Sign-in (see main()): people sign in with an identity from a 6j0.org identity server. The list is shared by the
-# identities in allowed_subs; any signed-in identity can use the feedback page.
+# Sign-in (see main()): people sign in with an identity from a 6j0.org identity server. Each identity gets its own
+# list (and pantry), and can share it by invite link.
 _auth = {
     "id_origin": "",
     "id_app": "shopping-list",
     "jwks_url": "",
-    "allowed_subs": frozenset(),
     "admin_sub": "",
     "secure_cookie": "",
 }
@@ -93,9 +94,56 @@ def init_db(path):
             user_id    INTEGER NOT NULL,
             created    INTEGER NOT NULL
         );
+        -- A list and its pantry. Its members are the users whose list_id points at it; items belong to one list.
+        CREATE TABLE IF NOT EXISTS lists (
+            id      INTEGER PRIMARY KEY,
+            created INTEGER NOT NULL
+        );
+        -- Single-use invite links to join a list. Only the code's SHA-256 is stored.
+        CREATE TABLE IF NOT EXISTS invites (
+            code_hash TEXT PRIMARY KEY,
+            list_id   INTEGER NOT NULL,
+            created   INTEGER NOT NULL
+        );
         """
     )
+    # Databases from before there was more than one list: their items and users have no list_id yet.
+    for table in ("items", "users"):
+        columns = {r["name"] for r in _db.execute(f"PRAGMA table_info({table})")}
+        if "list_id" not in columns:
+            _db.execute(f"ALTER TABLE {table} ADD COLUMN list_id INTEGER")
+    _db.execute("CREATE INDEX IF NOT EXISTS items_list ON items (list_id)")
     _db.commit()
+
+
+def claim_unowned(subs):
+    """Upgrade a database from when there was one list, shared by ALLOWED_SUBS: put the items that belong to no list,
+    and those identities, on one list. Identities that already have a list keep it. Returns a line to log, or None."""
+    subs = sorted(subs)
+    with _db_lock:
+        orphans = _db.execute("SELECT COUNT(*) FROM items WHERE list_id IS NULL").fetchone()[0]
+        if not subs:
+            if orphans:
+                return (f"{orphans} items from before lists were per person belong to no list. Set ALLOWED_SUBS "
+                        "to the identities that shared it, and restart, to give it back to them.")
+            return None
+        rows = _db.execute(
+            f"SELECT sub, list_id FROM users WHERE sub IN ({','.join('?' * len(subs))})", subs
+        ).fetchall()
+        has_list = {r["sub"]: r["list_id"] for r in rows if r["list_id"] is not None}
+        homeless = [s for s in subs if s not in has_list]
+        if not orphans and not homeless:
+            return None
+        target = next(iter(has_list.values()), None) or _new_list()
+        _db.execute("UPDATE items SET list_id = ? WHERE list_id IS NULL", (target,))
+        for sub in homeless:
+            if not _db.execute("UPDATE users SET list_id = ? WHERE sub = ?", (target, sub)).rowcount:
+                _db.execute(
+                    "INSERT INTO users (sub, guid, created, list_id) VALUES (?, ?, ?, ?)",
+                    (sub, secrets.token_hex(16), _now_ms(), target),
+                )
+        _db.commit()
+    return f"ALLOWED_SUBS: put {orphans} unowned {'item' if orphans == 1 else 'items'} and {len(homeless)} {'identity' if len(homeless) == 1 else 'identities'} on list {target}."
 
 
 # --- Accounts and sessions ------------------------------------------------
@@ -105,18 +153,40 @@ def _token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _new_list():
+    """Make an empty list. The caller holds _db_lock and commits."""
+    return _db.execute("INSERT INTO lists (created) VALUES (?)", (_now_ms(),)).lastrowid
+
+
+def _drop_list(list_id):
+    """Delete a list nobody is on any more, with its items and invites. The caller holds _db_lock and commits."""
+    _db.execute("DELETE FROM items WHERE list_id = ?", (list_id,))
+    _db.execute("DELETE FROM invites WHERE list_id = ?", (list_id,))
+    _db.execute("DELETE FROM lists WHERE id = ?", (list_id,))
+
+
+def _member_count(list_id):
+    return _db.execute("SELECT COUNT(*) FROM users WHERE list_id = ?", (list_id,)).fetchone()[0]
+
+
 def account_for(sub):
-    """Find or create the account for a verified 6j0.org identity. Returns its users.id."""
+    """Find or create the account for a verified 6j0.org identity, with a new, empty list of its own if it has none.
+    Returns its users.id."""
     with _db_lock:
-        row = _db.execute("SELECT id FROM users WHERE sub = ?", (sub,)).fetchone()
-        if row:
+        row = _db.execute("SELECT id, list_id FROM users WHERE sub = ?", (sub,)).fetchone()
+        if row and row["list_id"] is not None:
             return row["id"]
-        cur = _db.execute(
-            "INSERT INTO users (sub, guid, created) VALUES (?, ?, ?)",
-            (sub, secrets.token_hex(16), _now_ms()),
-        )
+        list_id = _new_list()
+        if row:
+            _db.execute("UPDATE users SET list_id = ? WHERE id = ?", (list_id, row["id"]))
+            user_id = row["id"]
+        else:
+            user_id = _db.execute(
+                "INSERT INTO users (sub, guid, created, list_id) VALUES (?, ?, ?, ?)",
+                (sub, secrets.token_hex(16), _now_ms(), list_id),
+            ).lastrowid
         _db.commit()
-        return cur.lastrowid
+        return user_id
 
 
 def new_session_cookie(user_id):
@@ -133,16 +203,22 @@ def new_session_cookie(user_id):
 
 
 def session_user(token):
-    """The signed-in account for a session token, as {id, sub, guid}, or None."""
+    """The signed-in account for a session token, as {id, sub, guid, list_id}, or None."""
     if not token:
         return None
     with _db_lock:
         row = _db.execute(
-            """SELECT u.id, u.sub, u.guid FROM sessions s JOIN users u ON u.id = s.user_id
+            """SELECT u.id, u.sub, u.guid, u.list_id FROM sessions s JOIN users u ON u.id = s.user_id
                WHERE s.token_hash = ? AND s.created > ?""",
             (_token_hash(token), _now_ms() - SESSION_MS),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    user = dict(row)
+    if user["list_id"] is None:  # signed in before lists were per person, and not in ALLOWED_SUBS
+        account_for(user["sub"])
+        return session_user(token)
+    return user
 
 
 def end_session(token):
@@ -152,19 +228,83 @@ def end_session(token):
 
 
 def erase_account(sub):
-    """The identity was deleted: erase its account, sessions, and feedback. The list itself is shared, so it stays."""
+    """The identity was deleted: erase its account, sessions, and feedback, and its list if nobody else is on it."""
     with _db_lock:
-        row = _db.execute("SELECT id, guid FROM users WHERE sub = ?", (sub,)).fetchone()
+        row = _db.execute("SELECT id, guid, list_id FROM users WHERE sub = ?", (sub,)).fetchone()
         if not row:
             return
         _db.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
         _db.execute("DELETE FROM users WHERE id = ?", (row["id"],))
+        if row["list_id"] is not None and _member_count(row["list_id"]) == 0:
+            _drop_list(row["list_id"])
         _db.commit()
     _feedback.erase_user(row["guid"])
 
 
-def can_use_list(user):
-    return user["sub"] in _auth["allowed_subs"]
+# --- Sharing a list -------------------------------------------------------
+# Everyone on a list can do everything with it: invite people, and take people off it. Someone taken off a list (or
+# who leaves) starts over with a new, empty list.
+
+
+def list_info(user):
+    """The people on the user's list. Each is shown by the account's random public ID, never its sub."""
+    with _db_lock:
+        rows = _db.execute("SELECT guid FROM users WHERE list_id = ? ORDER BY created, id", (user["list_id"],)).fetchall()
+    return {"members": [{"id": r["guid"], "you": r["guid"] == user["guid"]} for r in rows]}
+
+
+def create_invite(user):
+    code = secrets.token_urlsafe(18)
+    now = _now_ms()
+    with _db_lock:
+        _db.execute("DELETE FROM invites WHERE created <= ?", (now - INVITE_MS,))
+        _db.execute(
+            "INSERT INTO invites (code_hash, list_id, created) VALUES (?, ?, ?)",
+            (_token_hash(code), user["list_id"], now),
+        )
+        _db.commit()
+    return {"code": code, "days": INVITE_DAYS}
+
+
+def join_list(user, code):
+    """Accept an invite. If nobody else was on the user's old list, its items come along and the old list is
+    deleted; otherwise the old list stays with the people still on it."""
+    if not isinstance(code, str) or not code:
+        raise BadRequest("code is required")
+    with _db_lock:
+        invite = _db.execute(
+            "SELECT list_id FROM invites WHERE code_hash = ? AND created > ?",
+            (_token_hash(code), _now_ms() - INVITE_MS),
+        ).fetchone()
+        if not invite:
+            raise HttpError(HTTPStatus.NOT_FOUND, "That invite link has expired or was already used. Ask for a new one.")
+        new, old = invite["list_id"], user["list_id"]
+        if new == old:
+            raise BadRequest("You're already on this list.")
+        _db.execute("DELETE FROM invites WHERE code_hash = ?", (_token_hash(code),))
+        _db.execute("UPDATE users SET list_id = ? WHERE id = ?", (new, user["id"]))
+        moved = 0
+        if _member_count(old) == 0:
+            moved = _db.execute("UPDATE items SET list_id = ? WHERE list_id = ?", (new, old)).rowcount
+            _drop_list(old)
+        _db.commit()
+    return {**list_info({**user, "list_id": new}), "moved": moved}
+
+
+def remove_member(user, guid):
+    """Take someone (or, with your own ID, yourself) off the user's list. They get a new, empty list."""
+    with _db_lock:
+        target = _db.execute(
+            "SELECT id FROM users WHERE guid = ? AND list_id = ?", (guid, user["list_id"])
+        ).fetchone()
+        if not target:
+            raise HttpError(HTTPStatus.NOT_FOUND, "That person isn't on this list.")
+        if _member_count(user["list_id"]) == 1:
+            raise BadRequest("You're the only one on this list.")
+        new = _new_list()
+        _db.execute("UPDATE users SET list_id = ? WHERE id = ?", (new, target["id"]))
+        _db.commit()
+    return list_info({**user, "list_id": new} if target["id"] == user["id"] else user)
 
 
 def feedback_who(user):
@@ -178,9 +318,9 @@ def row_to_dict(row):
     return d
 
 
-def list_items():
+def list_items(list_id):
     with _db_lock:
-        rows = _db.execute("SELECT * FROM items").fetchall()
+        rows = _db.execute("SELECT * FROM items WHERE list_id = ?", (list_id,)).fetchall()
     items = [row_to_dict(r) for r in rows]
     items.sort(
         key=lambda i: (
@@ -192,9 +332,9 @@ def list_items():
     return items
 
 
-def get_item(item_id):
+def get_item(list_id, item_id):
     with _db_lock:
-        row = _db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        row = _db.execute("SELECT * FROM items WHERE id = ? AND list_id = ?", (item_id, list_id)).fetchone()
     return row_to_dict(row) if row else None
 
 
@@ -231,23 +371,23 @@ def _clean_text(data, key, required=False, limit=200):
     return value
 
 
-def create_item(data):
+def create_item(list_id, data):
     name = _clean_text(data, "name", required=True)
     quantity = _clean_text(data, "quantity")
     barcode = _clean_text(data, "barcode", limit=64) or None
     section, auto = _clean_section(data.get("section"), name)
     with _db_lock:
         cur = _db.execute(
-            "INSERT INTO items (name, quantity, section, section_auto, barcode) VALUES (?, ?, ?, ?, ?)",
-            (name, quantity, section, int(auto), barcode),
+            "INSERT INTO items (name, quantity, section, section_auto, barcode, list_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, quantity, section, int(auto), barcode, list_id),
         )
         _db.commit()
         item_id = cur.lastrowid
-    return get_item(item_id)
+    return get_item(list_id, item_id)
 
 
-def update_item(item_id, data):
-    item = get_item(item_id)
+def update_item(list_id, item_id, data):
+    item = get_item(list_id, item_id)
     if not item:
         return None
     name = _clean_text(data, "name", required=True) if "name" in data else item["name"]
@@ -262,23 +402,25 @@ def update_item(item_id, data):
     with _db_lock:
         _db.execute(
             """UPDATE items SET name = ?, quantity = ?, section = ?, section_auto = ?,
-               checked = ?, updated_at = datetime('now') WHERE id = ?""",
-            (name, quantity, section, int(auto), int(checked), item_id),
+               checked = ?, updated_at = datetime('now') WHERE id = ? AND list_id = ?""",
+            (name, quantity, section, int(auto), int(checked), item_id, list_id),
         )
         _db.commit()
-    return get_item(item_id)
+    return get_item(list_id, item_id)
 
 
-def delete_item(item_id):
+def delete_item(list_id, item_id):
     with _db_lock:
-        cur = _db.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        cur = _db.execute("DELETE FROM items WHERE id = ? AND list_id = ?", (item_id, list_id))
         _db.commit()
     return cur.rowcount > 0
 
 
-def clear_checked():
+def clear_checked(list_id):
     with _db_lock:
-        cur = _db.execute("DELETE FROM items WHERE checked = 1 AND section != ?", (sections.PANTRY,))
+        cur = _db.execute(
+            "DELETE FROM items WHERE list_id = ? AND checked = 1 AND section != ?", (list_id, sections.PANTRY)
+        )
         _db.commit()
     return cur.rowcount
 
@@ -365,11 +507,13 @@ def lookup_barcode(code):
 # --- Recipes --------------------------------------------------------------
 
 
-def recipe_matches(max_missing):
+def recipe_matches(list_id, max_missing):
     _catalog.ensure_fresh(background=True)
     all_recipes = _catalog.recipes()
     with _db_lock:
-        names = [r[0] for r in _db.execute("SELECT name FROM items WHERE section = ?", (sections.PANTRY,))]
+        names = [r[0] for r in _db.execute(
+            "SELECT name FROM items WHERE list_id = ? AND section = ?", (list_id, sections.PANTRY)
+        )]
     return {
         "recipes": recipes.match(all_recipes, names, max_missing=max_missing),
         "catalog_size": len(all_recipes),
@@ -383,6 +527,7 @@ def recipe_matches(max_missing):
 
 ITEM_PATH = re.compile(r"^/api/items/(\d+)$")
 BARCODE_PATH = re.compile(r"^/api/barcode/(\d{6,14})$")
+MEMBER_PATH = re.compile(r"^/api/list/members/([0-9a-f]{32})$")
 FEEDBACK_PATH = re.compile(r"^/api/feedback/([A-Za-z0-9_-]{1,32})$")
 FEEDBACK_REPLY_PATH = re.compile(r"^/api/feedback/([A-Za-z0-9_-]{1,32})/replies/([A-Za-z0-9_-]{1,32})$")
 FEEDBACK_ACTION_PATH = re.compile(r"^/api/feedback/([A-Za-z0-9_-]{1,32})/(replies|status)$")
@@ -495,10 +640,7 @@ class Handler(SimpleHTTPRequestHandler):
                 print(e, file=sys.stderr)
                 raise HttpError(HTTPStatus.BAD_GATEWAY, "Couldn't reach the 6j0.org identity server. Please try again.")
             user_id = account_for(claims["sub"])
-            allowed = claims["sub"] in _auth["allowed_subs"]
-            if not allowed:
-                print(f"sign-in: 6j0.org identity {claims['sub']} isn't in ALLOWED_SUBS, so it can only use feedback")
-            return self._send_json(HTTPStatus.OK, {"allowed": allowed}, {"Set-Cookie": new_session_cookie(user_id)})
+            return self._send_json(HTTPStatus.OK, {"ok": True}, {"Set-Cookie": new_session_cookie(user_id)})
 
         # The identity server says an identity was deleted. Answers 200 also when there's no such account, so the
         # identity server stops retrying.
@@ -530,48 +672,54 @@ class Handler(SimpleHTTPRequestHandler):
         if user is None:
             raise HttpError(HTTPStatus.UNAUTHORIZED, "Please sign in.")
 
-        # id is the identity's sub, shown to people who aren't on the list yet so they can ask to be added.
         if path == "/api/me" and method == "GET":
-            who = feedback_who(user)
-            return self._send_json(HTTPStatus.OK, {"allowed": can_use_list(user), "id": user["sub"], "isAdmin": who["admin"]})
+            return self._send_json(HTTPStatus.OK, {"isAdmin": feedback_who(user)["admin"]})
 
-        # ---- feedback: anyone signed in ----
         if path.startswith("/api/feedback"):
             return self._route_feedback(method, path, feedback_who(user))
 
-        # ---- the list: only identities in ALLOWED_SUBS ----
-        if not can_use_list(user):
-            raise HttpError(HTTPStatus.FORBIDDEN, "This shopping list is private. Ask its owner to add your 6j0.org ID.")
+        # ---- sharing the list ----
+        if path == "/api/list" and method == "GET":
+            return self._send_json(HTTPStatus.OK, list_info(user))
+        if path == "/api/list/invites" and method == "POST":
+            return self._send_json(HTTPStatus.CREATED, create_invite(user))
+        if path == "/api/list/join" and method == "POST":
+            return self._send_json(HTTPStatus.OK, join_list(user, self._read_json().get("code")))
+        m = MEMBER_PATH.match(path)
+        if m and method == "DELETE":
+            return self._send_json(HTTPStatus.OK, remove_member(user, m.group(1)))
 
+        # ---- the user's list ----
+        list_id = user["list_id"]
         if method == "GET":
-            return self._route_list_get(path)
+            return self._route_list_get(list_id, path)
         if method == "POST":
             if path == "/api/items":
-                return self._send_json(HTTPStatus.CREATED, create_item(self._read_json()))
+                return self._send_json(HTTPStatus.CREATED, create_item(list_id, self._read_json()))
             if path == "/api/items/clear-checked":
-                return self._send_json(HTTPStatus.OK, {"deleted": clear_checked()})
+                return self._send_json(HTTPStatus.OK, {"deleted": clear_checked(list_id)})
         m = ITEM_PATH.match(path)
         if m and method == "PUT":
-            item = update_item(int(m.group(1)), self._read_json())
+            item = update_item(list_id, int(m.group(1)), self._read_json())
             if not item:
                 raise HttpError(HTTPStatus.NOT_FOUND, "no such item")
             return self._send_json(HTTPStatus.OK, item)
         if m and method == "DELETE":
-            if not delete_item(int(m.group(1))):
+            if not delete_item(list_id, int(m.group(1))):
                 raise HttpError(HTTPStatus.NOT_FOUND, "no such item")
             return self._send_empty()
         raise HttpError(HTTPStatus.NOT_FOUND, "not found")
 
-    def _route_list_get(self, path):
+    def _route_list_get(self, list_id, path):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if path == "/api/items":
-            return self._send_json(HTTPStatus.OK, list_items())
+            return self._send_json(HTTPStatus.OK, list_items(list_id))
         if path == "/api/sections":
             return self._send_json(HTTPStatus.OK, {"sections": sections.SECTIONS, "pantry": sections.PANTRY})
         if path == "/api/recipes":
             raw = query.get("max_missing", [""])[0]
             max_missing = int(raw) if raw.isdigit() else None
-            return self._send_json(HTTPStatus.OK, recipe_matches(max_missing))
+            return self._send_json(HTTPStatus.OK, recipe_matches(list_id, max_missing))
         if path.startswith("/api/classify"):
             return self._send_json(HTTPStatus.OK, {"section": sections.classify(query.get("name", [""])[0])})
         m = BARCODE_PATH.match(path)
@@ -623,7 +771,7 @@ def main():
     ap.add_argument("--id-origin", default=env("ID_ORIGIN"), help="the 6j0.org identity server, e.g. https://id.6j0.org (required) [ID_ORIGIN]")
     ap.add_argument("--id-app", default=env("ID_APP", "shopping-list"), help="this app's name in the identity server's APPS [ID_APP]")
     ap.add_argument("--id-jwks-url", default=env("ID_JWKS_URL"), help="where to fetch the identity server's public keys (default: ID_ORIGIN/.well-known/jwks.json) [ID_JWKS_URL]")
-    ap.add_argument("--allowed-subs", default=env("ALLOWED_SUBS", ""), help="6j0.org identities (subs), comma- or space-separated, that share the list [ALLOWED_SUBS]")
+    ap.add_argument("--allowed-subs", default=env("ALLOWED_SUBS", ""), help="upgrading from one shared list: the 6j0.org identities (subs), comma- or space-separated, that shared it [ALLOWED_SUBS]")
     ap.add_argument("--admin-sub", default=env("ADMIN_SUB", ""), help="the 6j0.org identity that can close and delete anyone's feedback [ADMIN_SUB]")
     ap.add_argument("--origin", default=env("ORIGIN", ""), help="this app's public origin, e.g. https://shopping.6j0.org; https: turns on Secure cookies [ORIGIN]")
     args = ap.parse_args()
@@ -636,15 +784,14 @@ def main():
         id_origin=origin,
         id_app=args.id_app,
         jwks_url=args.id_jwks_url or f"{origin}/.well-known/jwks.json",
-        allowed_subs=_split_subs(args.allowed_subs),
         admin_sub=args.admin_sub.strip(),
         secure_cookie="; Secure" if args.origin.startswith("https:") else "",
     )
-    if not _auth["allowed_subs"]:
-        print("ALLOWED_SUBS is empty, so nobody can use the list yet. Sign in to see your 6j0.org ID, then add it.")
-
     global _catalog, _feedback
     init_db(args.db)
+    note = claim_unowned(_split_subs(args.allowed_subs))
+    if note:
+        print(note)
     _feedback = Feedback(args.feedback or str(Path(args.db).resolve().parent / "feedback.jsonl"))
     _catalog = recipes.Catalog(_db, _db_lock, USER_AGENT)
     _catalog.ensure_fresh(background=True)  # download recipes without delaying startup
