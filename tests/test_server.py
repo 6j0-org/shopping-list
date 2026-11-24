@@ -25,6 +25,7 @@ from tests.fakeid import FakeIdServer  # noqa: E402
 
 APP = "shopping-list"
 NONCE = "n" * 32
+OFF = {"search": False, "quantity": False, "aisle": False, "barcodeTyping": False}
 
 
 class ServerTest(unittest.TestCase):
@@ -126,7 +127,7 @@ class ServerTest(unittest.TestCase):
     def test_everyone_starts_with_their_own_empty_list(self):
         alice, body = self.sign_in("alice-sub")
         self.assertEqual(body, {"ok": True})
-        self.assertEqual(self.request("GET", "/api/me", sid=alice)[1], {"isAdmin": False})
+        self.assertEqual(self.request("GET", "/api/me", sid=alice)[1], {"isAdmin": False, "settings": OFF})
         self.assertEqual(self.names(alice), [])
         self.assertEqual(self.request("GET", "/api/sections", sid=alice)[0], 200)
         item = self.add(alice, "Bananas", quantity="6")
@@ -300,6 +301,93 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("Max-Age=0", res.getheader("Set-Cookie"))
         self.assertEqual(self.request("GET", "/api/me", sid=sid)[0], 401)
+
+    def test_settings(self):
+        sid, _ = self.sign_in("settings-sub")
+        self.assertEqual(self.request("PUT", "/api/settings", {"search": True})[0], 401)
+        status, body, _ = self.request("PUT", "/api/settings", {"search": True, "quantity": True}, sid=sid)
+        self.assertEqual((status, body), (200, {**OFF, "search": True, "quantity": True}))
+        status, body, _ = self.request("PATCH", "/api/settings", {"quantity": False}, sid=sid)
+        self.assertEqual(body, {**OFF, "search": True}, "a change leaves the other settings alone")
+        again, _ = self.sign_in("settings-sub")
+        self.assertEqual(self.request("GET", "/api/me", sid=again)[1]["settings"], {**OFF, "search": True},
+                         "they follow the account to another session")
+        for bad in ({"colour": True}, {"search": "yes"}, {"search": 1}):
+            with self.subTest(body=bad):
+                self.assertEqual(self.request("PUT", "/api/settings", bad, sid=sid)[0], 400)
+
+        # Per person, even on a shared list.
+        host, _ = self.sign_in("settings-host")
+        self.request("POST", "/api/list/join", {"code": self.invite(host)}, sid=sid)
+        self.assertEqual(self.request("GET", "/api/me", sid=host)[1]["settings"], OFF)
+        self.assertEqual(self.request("GET", "/api/me", sid=sid)[1]["settings"], {**OFF, "search": True})
+
+    def shortcut(self, token, body, **headers):
+        auth = {"Authorization": f"Bearer {token}"} if token else {}
+        return self.request("POST", "/api/shortcut/items", body, headers={**auth, **headers})
+
+    def test_api_tokens_for_siri(self):
+        sid, _ = self.sign_in("siri-sub")
+        self.assertEqual(self.request("GET", "/api/token", sid=sid)[1], {"token": None})
+        self.assertEqual(self.request("POST", "/api/token", {})[0], 401, "making a token needs a session")
+        status, made, _ = self.request("POST", "/api/token", {}, sid=sid)
+        self.assertEqual((status, made["lastUsed"]), (201, 0))
+        token = made["token"]
+        self.assertTrue(token.startswith("sl_"))
+        info = self.request("GET", "/api/token", sid=sid)[1]
+        self.assertEqual((info["token"], info["created"], info["lastUsed"]), (None, made["created"], 0),
+                         "the token is only shown when it's made")
+        with server._db_lock:
+            stored = [r[0] for r in server._db.execute("SELECT token_hash FROM api_tokens")]
+        self.assertNotIn(token, stored, "stored hashed")
+
+        # Adding: dictation's trailing period goes, and an ingredient takes TheMealDB's spelling.
+        status, body, _ = self.shortcut(token, {"name": "peanut butter."}, **{"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(status, 201, body)
+        self.assertEqual(body["message"], "Added Peanut Butter to the shopping list.")
+        self.assertEqual((body["item"]["name"], body["item"]["section"] != "Pantry"), ("Peanut Butter", True))
+        self.assertEqual(self.shortcut(token, {"name": "Paper towels", "quantity": "2"})[1]["item"]["quantity"], "2")
+        self.assertEqual(self.names(sid), ["Paper towels", "Peanut Butter"])
+        self.assertGreater(self.request("GET", "/api/token", sid=sid)[1]["lastUsed"], 0)
+
+        status, body, _ = self.shortcut(token, {"name": " . "})
+        self.assertEqual((status, body["message"]), (400, "name is required"), "errors carry a message to speak")
+        self.assertEqual(self.request("GET", "/api/shortcut/items", headers={"Authorization": f"Bearer {token}"})[0], 405)
+
+        # A token is good for adding items and nothing else; a session isn't good for the shortcut route.
+        for method, path in [("GET", "/api/items"), ("GET", "/api/token"), ("POST", "/api/token")]:
+            with self.subTest(path=path):
+                res = self.request(method, path, {} if method == "POST" else None,
+                                   headers={"Authorization": f"Bearer {token}"})
+                self.assertEqual(res[0], 401)
+        self.assertEqual(self.request("POST", "/api/shortcut/items", {"name": "x"}, sid=sid)[0], 401)
+        for bad in (None, "nope", "sl_nope", token + "x"):
+            with self.subTest(token=bad):
+                status, body, _ = self.shortcut(bad, {"name": "Eggs"})
+                self.assertEqual(status, 401)
+                self.assertIn("token", body["message"])
+        self.assertEqual(self.request("POST", "/api/shortcut/items", {"name": "x"},
+                                      headers={"Authorization": f"Basic {token}"})[0], 401)
+
+        # The token follows its owner to a shared list.
+        host, _ = self.sign_in("siri-host")
+        self.request("POST", "/api/list/join", {"code": self.invite(host)}, sid=sid)
+        self.shortcut(token, {"name": "Milk"})
+        self.assertIn("Milk", self.names(host))
+
+        # A new token replaces the old one; turning it off stops it.
+        newer = self.request("POST", "/api/token", {}, sid=sid)[1]["token"]
+        self.assertEqual(self.shortcut(token, {"name": "Eggs"})[0], 401, "the old token stops working")
+        self.assertEqual(self.shortcut(newer, {"name": "Eggs"})[0], 201)
+        self.assertEqual(self.request("DELETE", "/api/token", sid=sid)[0], 204)
+        self.assertEqual(self.shortcut(newer, {"name": "Eggs"})[0], 401)
+        self.assertEqual(self.request("GET", "/api/token", sid=sid)[1], {"token": None})
+
+    def test_identity_deletion_ends_api_tokens(self):
+        sid, _ = self.sign_in("siri-gone")
+        token = self.request("POST", "/api/token", {}, sid=sid)[1]["token"]
+        self.request("POST", "/api/id/deleted", {"token": self.id.deletion_token("siri-gone", APP)})
+        self.assertEqual(self.shortcut(token, {"name": "Eggs"})[0], 401)
 
     def test_sessions_are_stored_hashed(self):
         sid, _ = self.sign_in("owner-sub")

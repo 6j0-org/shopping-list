@@ -94,6 +94,15 @@ def init_db(path):
             user_id    INTEGER NOT NULL,
             created    INTEGER NOT NULL
         );
+        -- A personal API token, at most one per user, for adding items from outside the app (an iOS Shortcut run
+        -- by Siri, say). Only its SHA-256 is stored. It belongs to the user, not the list, so it follows them to
+        -- whatever list they're on.
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            token_hash TEXT PRIMARY KEY,
+            user_id    INTEGER NOT NULL UNIQUE,
+            created    INTEGER NOT NULL,
+            last_used  INTEGER NOT NULL DEFAULT 0
+        );
         -- A list and its pantry. Its members are the users whose list_id points at it; items belong to one list.
         CREATE TABLE IF NOT EXISTS lists (
             id      INTEGER PRIMARY KEY,
@@ -112,6 +121,9 @@ def init_db(path):
         columns = {r["name"] for r in _db.execute(f"PRAGMA table_info({table})")}
         if "list_id" not in columns:
             _db.execute(f"ALTER TABLE {table} ADD COLUMN list_id INTEGER")
+    # Each person's settings (see SETTINGS), as JSON. Databases from before there were settings lack the column.
+    if "settings" not in {r["name"] for r in _db.execute("PRAGMA table_info(users)")}:
+        _db.execute("ALTER TABLE users ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")
     _db.execute("CREATE INDEX IF NOT EXISTS items_list ON items (list_id)")
     _db.commit()
 
@@ -234,11 +246,125 @@ def erase_account(sub):
         if not row:
             return
         _db.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+        _db.execute("DELETE FROM api_tokens WHERE user_id = ?", (row["id"],))
         _db.execute("DELETE FROM users WHERE id = ?", (row["id"],))
         if row["list_id"] is not None and _member_count(row["list_id"]) == 0:
             _drop_list(row["list_id"])
         _db.commit()
     _feedback.erase_user(row["guid"])
+
+
+# --- Settings -------------------------------------------------------------
+# Which optional controls the app shows (the Settings tab). Per person, not per list, so people sharing a list can
+# set them differently. All off to start.
+
+SETTINGS = ("search", "quantity", "aisle", "barcodeTyping")
+
+
+def get_settings(user):
+    with _db_lock:
+        row = _db.execute("SELECT settings FROM users WHERE id = ?", (user["id"],)).fetchone()
+    try:
+        saved = json.loads(row["settings"]) if row else {}
+    except ValueError:
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    return {k: saved.get(k) is True for k in SETTINGS}
+
+
+def update_settings(user, data):
+    """Change any of SETTINGS (each true or false); the rest stay. Returns them all."""
+    for k, v in data.items():
+        if k not in SETTINGS:
+            raise BadRequest(f"unknown setting: {k}")
+        if not isinstance(v, bool):
+            raise BadRequest(f"{k} must be true or false")
+    settings = {**get_settings(user), **data}
+    with _db_lock:
+        _db.execute("UPDATE users SET settings = ? WHERE id = ?", (json.dumps(settings), user["id"]))
+        _db.commit()
+    return settings
+
+
+# --- API tokens (Siri and other shortcuts) --------------------------------
+# A token can only add items to its owner's list (POST /api/shortcut/items). Making a new one replaces the old one.
+
+API_TOKEN_PREFIX = "sl_"
+
+
+def api_token_info(user):
+    with _db_lock:
+        row = _db.execute("SELECT created, last_used FROM api_tokens WHERE user_id = ?", (user["id"],)).fetchone()
+    return {"token": None, "created": row["created"], "lastUsed": row["last_used"]} if row else {"token": None}
+
+
+def new_api_token(user):
+    """Make the user a new token, replacing any old one. The token itself is only ever shown this once."""
+    token = API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = _now_ms()
+    with _db_lock:
+        _db.execute("DELETE FROM api_tokens WHERE user_id = ?", (user["id"],))
+        _db.execute(
+            "INSERT INTO api_tokens (token_hash, user_id, created) VALUES (?, ?, ?)",
+            (_token_hash(token), user["id"], now),
+        )
+        _db.commit()
+    return {"token": token, "created": now, "lastUsed": 0}
+
+
+def revoke_api_token(user):
+    with _db_lock:
+        _db.execute("DELETE FROM api_tokens WHERE user_id = ?", (user["id"],))
+        _db.commit()
+
+
+def api_token_user(token):
+    """The account an API token belongs to, as {id, sub, guid, list_id}, or None. Notes when it was used."""
+    if not token or not token.startswith(API_TOKEN_PREFIX):
+        return None
+    with _db_lock:
+        row = _db.execute(
+            """SELECT u.id, u.sub, u.guid, u.list_id FROM api_tokens t JOIN users u ON u.id = t.user_id
+               WHERE t.token_hash = ?""",
+            (_token_hash(token),),
+        ).fetchone()
+        if row:
+            _db.execute("UPDATE api_tokens SET last_used = ? WHERE token_hash = ?", (_now_ms(), _token_hash(token)))
+            _db.commit()
+    if not row:
+        return None
+    if row["list_id"] is None:  # signed in before lists were per person (see session_user)
+        account_for(row["sub"])
+        return api_token_user(token)
+    return dict(row)
+
+
+def _fold(name):
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+def canonical_name(name):
+    """Dictation says "peanut butter." for "Peanut Butter": drop the trailing period, and use TheMealDB's spelling
+    when the name is one of its ingredients, ignoring case and punctuation (as the app's add form does). Otherwise
+    the name as given."""
+    name = name.strip().rstrip(".").strip()
+    folded = _fold(name)
+    try:
+        ingredients = _catalog.ingredients() if _catalog else []
+    except Exception:  # the ingredient list is a nice-to-have
+        traceback.print_exc()
+        ingredients = []
+    return next((n for n in ingredients if _fold(n) == folded), name)
+
+
+def shortcut_add(user, data):
+    """Add an item from a shortcut. The reply's "message" is meant to be spoken back."""
+    name = canonical_name(_clean_text(data, "name", required=True))
+    if not name:
+        raise BadRequest("name is required")
+    item = create_item(user["list_id"], {"name": name, "quantity": _clean_text(data, "quantity")})
+    return {"item": item, "message": f"Added {item['name']} to the shopping list."}
 
 
 # --- Sharing a list -------------------------------------------------------
@@ -617,6 +743,11 @@ class Handler(SimpleHTTPRequestHandler):
                 raise HttpError(HTTPStatus.METHOD_NOT_ALLOWED, "method not allowed")
             return super().do_GET()
 
+        # ---- adding items with an API token (an iOS Shortcut run by Siri, say). Nothing else takes a token. It
+        # ignores the session cookie, so the cross-site check below, which protects the cookie, doesn't apply. ----
+        if path == "/api/shortcut/items":
+            return self._route_shortcut(method)
+
         # State changes only from this app's own pages. (The session cookie is SameSite=Lax as well.)
         site = self.headers.get("Sec-Fetch-Site")
         if method != "GET" and site and site not in ("same-origin", "none"):
@@ -673,10 +804,22 @@ class Handler(SimpleHTTPRequestHandler):
             raise HttpError(HTTPStatus.UNAUTHORIZED, "Please sign in.")
 
         if path == "/api/me" and method == "GET":
-            return self._send_json(HTTPStatus.OK, {"isAdmin": feedback_who(user)["admin"]})
+            return self._send_json(HTTPStatus.OK, {"isAdmin": feedback_who(user)["admin"], "settings": get_settings(user)})
+        if path == "/api/settings" and method in ("PUT", "PATCH"):
+            return self._send_json(HTTPStatus.OK, update_settings(user, self._read_json()))
 
         if path.startswith("/api/feedback"):
             return self._route_feedback(method, path, feedback_who(user))
+
+        # ---- the user's API token ----
+        if path == "/api/token":
+            if method == "GET":
+                return self._send_json(HTTPStatus.OK, api_token_info(user))
+            if method == "POST":
+                return self._send_json(HTTPStatus.CREATED, new_api_token(user))
+            if method == "DELETE":
+                revoke_api_token(user)
+                return self._send_empty()
 
         # ---- sharing the list ----
         if path == "/api/list" and method == "GET":
@@ -709,6 +852,23 @@ class Handler(SimpleHTTPRequestHandler):
                 raise HttpError(HTTPStatus.NOT_FOUND, "no such item")
             return self._send_empty()
         raise HttpError(HTTPStatus.NOT_FOUND, "not found")
+
+    def _route_shortcut(self, method):
+        """POST {"name", "quantity"?} with "Authorization: Bearer <token>". Errors carry a "message" too, so a
+        shortcut that speaks "message" says what went wrong."""
+        try:
+            if method != "POST":
+                raise HttpError(HTTPStatus.METHOD_NOT_ALLOWED, "method not allowed")
+            scheme, _, token = (self.headers.get("Authorization") or "").partition(" ")
+            user = api_token_user(token.strip()) if scheme.lower() == "bearer" else None
+            if user is None:
+                raise HttpError(
+                    HTTPStatus.UNAUTHORIZED,
+                    "The shopping list didn't accept this shortcut's token. Make a new one in the app, under Siri.",
+                )
+            return self._send_json(HTTPStatus.CREATED, shortcut_add(user, self._read_json()))
+        except HttpError as e:
+            return self._send_json(e.status, {"error": e.message, "message": e.message})
 
     def _route_list_get(self, list_id, path):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)

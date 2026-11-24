@@ -12,6 +12,7 @@
     <div class="topbar-row">
       <h1>Shopping List</h1>
       <button id="share-btn" class="small ghost" hidden>Share</button>
+      <button id="siri-btn" class="small ghost" hidden>Siri</button>
       <button id="feedback-btn" class="small ghost" aria-pressed="false" hidden>Feedback</button>
       <button id="signout-btn" class="small ghost" hidden>Sign out</button>
     </div>
@@ -19,6 +20,7 @@
       <button role="tab" class="tab" data-view="list" aria-selected="true">List</button>
       <button role="tab" class="tab" data-view="pantry" aria-selected="false">Pantry</button>
       <button role="tab" class="tab" data-view="recipes" aria-selected="false">Recipes</button>
+      <button role="tab" class="tab" data-view="settings" aria-selected="false">Settings</button>
     </nav>
   </header>
 
@@ -40,11 +42,11 @@
 
     <!-- Shopping list -->
     <section id="view-list" class="view" hidden>
-      <input type="search" id="list-search" class="search" placeholder="Search the list" aria-label="Search the list" autocomplete="off" enterkeyhint="search">
+      <input type="search" id="list-search" class="search opt-search" placeholder="Search the list" aria-label="Search the list" autocomplete="off" enterkeyhint="search">
       <form id="add-form" class="add-form" autocomplete="off">
         <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name" list="ingredients">
-        <input name="quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
-        <select name="section" aria-label="Store section"></select>
+        <input name="quantity" class="opt-quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
+        <select name="section" class="opt-aisle" aria-label="Store section"></select>
         <button type="submit" class="primary">Add</button>
       </form>
       <!-- A typed name that isn't in the ingredient list: pick a close one, or add it as typed -->
@@ -58,17 +60,17 @@
 
     <!-- Pantry -->
     <section id="view-pantry" class="view" hidden>
-      <input type="search" id="pantry-search" class="search" placeholder="Search the pantry" aria-label="Search the pantry" autocomplete="off" enterkeyhint="search">
+      <input type="search" id="pantry-search" class="search opt-search" placeholder="Search the pantry" aria-label="Search the pantry" autocomplete="off" enterkeyhint="search">
       <div class="scan-bar">
         <button id="scan-btn" class="primary big">📷 Scan barcode</button>
-        <form id="code-form" class="code-form" autocomplete="off">
+        <form id="code-form" class="code-form opt-barcode-typing" autocomplete="off">
           <input name="code" inputmode="numeric" pattern="\d{6,14}" placeholder="…or type a barcode" aria-label="Barcode number">
           <button type="submit">Look up</button>
         </form>
       </div>
       <form id="pantry-add-form" class="add-form" autocomplete="off">
         <input name="name" placeholder="Add pantry item by hand" required maxlength="200" aria-label="Item name" list="ingredients">
-        <input name="quantity" placeholder="Quantity" maxlength="200" aria-label="Quantity">
+        <input name="quantity" class="opt-quantity" placeholder="Quantity" maxlength="200" aria-label="Quantity">
         <button type="submit" class="primary">Add</button>
       </form>
       <div id="pantry-suggest" class="suggest" role="group" aria-live="polite" hidden></div>
@@ -93,6 +95,29 @@
       <div id="recipes"></div>
       <p id="recipes-empty" class="empty" hidden></p>
     </section>
+    <!-- Settings: which optional controls show. Saved per person on the server (see static/app.js). -->
+    <section id="view-settings" class="view" hidden>
+      <div class="card settings">
+        <h2>Settings</h2>
+        <p class="muted small">These are saved with your account, so they follow you to every device. Each person on a shared list has their own.</p>
+        <label class="setting">
+          <input type="checkbox" data-setting="search">
+          <span><b>Search</b><br><span class="muted small">A search box at the top of the List and Pantry pages.</span></span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" data-setting="quantity">
+          <span><b>Quantity when adding</b><br><span class="muted small">A quantity box ("2 lb") when you add an item. You can always set a quantity by editing the item.</span></span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" data-setting="aisle">
+          <span><b>Aisle when adding</b><br><span class="muted small">An aisle menu when you add an item to the list. Without it, the aisle is guessed from the name, and you can change it by editing the item.</span></span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" data-setting="barcodeTyping">
+          <span><b>Type barcodes</b><br><span class="muted small">Look up a barcode by its number on the Pantry page, as well as by scanning.</span></span>
+        </label>
+      </div>
+    </section>
   </main>
 
   <!-- Scanner -->
@@ -113,7 +138,7 @@
       <h2>Add to pantry</h2>
       <p id="confirm-source" class="muted"></p>
       <label>Name <input name="name" required maxlength="200" list="ingredients"></label>
-      <label>Quantity <input name="quantity" maxlength="200"></label>
+      <label class="opt-quantity">Quantity <input name="quantity" maxlength="200"></label>
       <input type="hidden" name="barcode">
       <div class="row-actions">
         <button value="cancel" formnovalidate class="ghost">Cancel</button>
@@ -137,6 +162,48 @@
     <div class="row-actions">
       <button id="leave-btn" class="ghost" hidden>Leave this list</button>
       <button id="share-close">Done</button>
+    </div>
+  </dialog>
+
+  <!-- Add items with Siri: a personal API token for an iOS Shortcut -->
+  <dialog id="siri" class="sheet">
+    <h2>Add items with Siri</h2>
+    <p class="muted">An iPhone or iPad shortcut can add items to your list when you ask Siri. It needs a token, a
+      password that can only add items to your list.</p>
+    <p id="siri-status" class="small"></p>
+    <div class="row-actions start">
+      <button id="siri-make" class="primary">Make a token</button>
+      <button id="siri-revoke" class="ghost" hidden>Turn off the token</button>
+    </div>
+    <div id="siri-new" hidden>
+      <p class="muted small">This shows only once, so copy it now. Treat it like a password: anyone with it can add
+        items to your list.</p>
+      <p class="id-row"><code id="siri-token"></code> <button id="siri-copy-token" class="small">Copy</button></p>
+    </div>
+    <details class="siri-steps">
+      <summary>Set up the shortcut</summary>
+      <ol>
+        <li>In the Shortcuts app, tap <b>+</b> and name the shortcut <b>Add to shopping list</b>. The name is what
+          you'll say to Siri.</li>
+        <li>Add <b>Ask for Input</b>: type Text, prompt "What do you need?"</li>
+        <li>Add <b>Get Contents of URL</b>, with the URL
+          <span class="id-row"><code id="siri-url"></code> <button id="siri-copy-url" class="small">Copy</button></span>
+          Tap the arrow to show more options, then set:
+          <ul>
+            <li>Method: <b>POST</b></li>
+            <li>Headers: add one named <b>Authorization</b>, with the value <b>Bearer</b>, a space, and your token
+              (the Copy button above copies the whole value)</li>
+            <li>Request Body: <b>JSON</b>, with a Text field named <b>name</b>, set to <b>Provided Input</b></li>
+          </ul>
+        </li>
+        <li>Add <b>Get Dictionary Value</b>: get the value for <b>message</b> in Contents of URL.</li>
+        <li>Add <b>Show Result</b> with the Dictionary Value. Siri reads it out, like "Added Peanut Butter to the
+          shopping list."</li>
+      </ol>
+      <p class="muted small">Then say "Hey Siri, add to shopping list", and tell it what you need.</p>
+    </details>
+    <div class="row-actions">
+      <button id="siri-close">Done</button>
     </div>
   </dialog>
 

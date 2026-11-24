@@ -2,14 +2,16 @@
 
 A small self-hosted shopping list. Python 3's standard library, plus [`cryptography`](https://cryptography.io/) to check sign-in tokens.
 
-- Add, edit (tap an item), check off, and delete items. The search box at the top of the List and Pantry pages narrows them to items whose name contains every word you type. Names typed into the list or the pantry, or changed when editing an item, are matched against TheMealDB's list of about 1,000 generic ingredients (the one recipes use), so they say "Peanut Butter", not "pnut butter": the list suggests names as you type, and a name that isn't on it offers the closest few, or to add it anyway (for things like paper towels).
-- Quantity is free text: `2`, `2oz`, `a fuckton`, whatever.
-- Items are grouped and sorted by store aisle (Produce → Bakery → Deli → Meat → Dairy → Frozen → … → Pet). The aisle is guessed from the name (`sections.py`); you can override it per item, and an override sticks when you rename the item.
+- Add, edit (tap an item), check off, and delete items. The search box at the top of the List and Pantry pages (turned on in Settings) narrows them to items whose name contains every word you type. Names typed into the list or the pantry, or changed when editing an item, are matched against TheMealDB's list of about 1,000 generic ingredients (the one recipes use), so they say "Peanut Butter", not "pnut butter": the list suggests names as you type, and a name that isn't on it offers the closest few, or to add it anyway (for things like paper towels).
+- Quantity is free text: `2`, `2oz`, `a fuckton`, whatever. You set it by editing an item; the add forms only ask for it with "Quantity when adding" turned on in Settings.
+- Items are grouped and sorted by store aisle (Produce → Bakery → Deli → Meat → Dairy → Frozen → … → Pet). The aisle is guessed from the name (`sections.py`); you can override it per item by editing it (or when adding, with "Aisle when adding" turned on in Settings), and an override sticks when you rename the item.
 - **Pantry** tab: scan barcodes with your phone camera to record what you already have. The camera stays on: each product it finds in the barcode databases goes straight into the pantry with a beep, so you can scan one item after another. A barcode the databases don't know gets a low beep instead: set that item aside, keep scanning, and add the set-aside items by hand when you close the scanner. Names typed by hand are matched the same way as on the list, so recipes find them. The 🛒 button on a pantry item adds it to the shopping list.
+- **Settings** tab: turn on the extras that are hidden to keep things simple: search, a quantity box and an aisle menu on the add forms, and typing a barcode number on the Pantry page. All are off to start, and they're saved with each person's account, so they follow you across devices and people sharing a list can set them differently. Turning one off only hides it; nothing already saved changes.
 - **Recipes** tab: recipes you can make from your pantry, with the fewest missing ingredients first. Choose how many missing ingredients are OK (0–3 or any). Open a recipe to see its ingredients and instructions, and use "Add N missing to list" to put what you lack on the shopping list.
 - **Accounts:** people sign in with an anonymous identity from a [6j0.org identity server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one passkey (or username and password) covers every 6j0.org app. Everyone who signs in gets their own list and pantry, empty to start.
 - **Share** button: make an invite link and send it to someone (a household, say). When they open it and choose Join, you share one list and pantry. Each link works once, for 7 days. Anyone on a list can invite people, take people off it, or leave; whoever is taken off or leaves starts over with an empty list.
-- Leave it alone for 15 seconds and Hot Dog Man leans in from the side of the screen (`static/hotdog.js`). Touch anything and he goes away. He stays out of open dialogs, like the scanner.
+- **Siri** button: make a personal token so an iPhone or iPad shortcut can add items when you ask Siri ("Hey Siri, add to shopping list"). The dialog walks through building the shortcut. The token can only add items to your list (`POST /api/shortcut/items`), and it follows you if you join someone else's list. Making a new one replaces the old one, and you can turn it off. Names from Siri lose dictation's trailing period and take TheMealDB's spelling when they're one of its ingredients ("peanut butter." becomes "Peanut Butter").
+- Leave it alone for 15 seconds and, one time in ten, Hot Dog Man leans in from the side of the screen (`static/hotdog.js`). One click, tap, or key press sends him away, and it doesn't reach whatever was under him. He stays out of open dialogs, like the scanner.
 - **Feedback** button: signed-in people read everyone's feedback, post their own, and reply in each post's thread (see [Feedback](#feedback)).
 
 ## Run
@@ -177,8 +179,8 @@ TheMealDB's terms say the test key is for development and education. If you depl
 
 ## API
 
-Everything except `/api/config`, `/api/id/login`, `/api/id/deleted`, and `/api/logout` needs a session; without one it
-answers 401. Items and recipes are those of the signed-in person's list; an item on another list answers 404.
+Everything except `/api/config`, `/api/id/login`, `/api/id/deleted`, `/api/logout`, and `/api/shortcut/items` (which
+takes an API token instead) needs a session; without one it answers 401. Items and recipes are those of the signed-in person's list; an item on another list answers 404.
 
 | Method | Path | Body / notes |
 |---|---|---|
@@ -186,7 +188,12 @@ answers 401. Items and recipes are those of the signed-in person's list; an item
 | POST | `/api/id/login` | `{token, nonce}` → `{ok}` and sets the session cookie |
 | POST | `/api/id/deleted` | `{token}`, a signed deletion notice from the identity server; erases that account |
 | POST | `/api/logout` | Ends the session |
-| GET | `/api/me` | `{isAdmin}` |
+| GET | `/api/me` | `{isAdmin, settings}`; `settings` is `{search, quantity, aisle, barcodeTyping}`, each true or false |
+| PUT/PATCH | `/api/settings` | Any of `{search, quantity, aisle, barcodeTyping}` (true or false) → all of them |
+| GET | `/api/token` | `{token: null, created?, lastUsed?}`: whether you have an API token (times in ms; `lastUsed` is 0 if never) |
+| POST | `/api/token` | → `{token, created, lastUsed}`, a new API token, replacing any old one. The only time the token is shown |
+| DELETE | `/api/token` | Turns off your API token |
+| POST | `/api/shortcut/items` | With `Authorization: Bearer <API token>` instead of a session: `{name, quantity?}` → `{item, message}`; `message` (also on errors, with `error`) is meant to be spoken, like "Added Peanut Butter to the shopping list." |
 | GET | `/api/list` | `{members: [{id, you}]}`, the people on your list; `id` is the account's random public ID, never its `sub` |
 | POST | `/api/list/invites` | → `{code, days}`; the invite link is `/#join=<code>`, single use |
 | POST | `/api/list/join` | `{code}` → `{members, moved}`. If you were alone on your list, its `moved` items come along and it's deleted |

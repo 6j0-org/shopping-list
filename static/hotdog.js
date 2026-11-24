@@ -1,11 +1,14 @@
-// Hot Dog Man. After 15 seconds without a tap, key, scroll, or mouse move, he leans in from the right edge of the
-// screen and stares. Any activity sends him back. He stays away while a dialog is open (the scanner can sit still
-// for a long time), while the tab is hidden, and for people who ask for reduced motion he just appears, without the
-// slow lean.
+// Hot Dog Man. After 15 seconds without a tap, key, scroll, or mouse move, there's a one-in-ten chance he leans in
+// from the right edge of the screen and stares; otherwise he skips that idle stretch and waits for the next one. Once
+// he's there, moving or scrolling doesn't scare him off: it takes a click, tap, or key press, and that one is used up
+// sending him away, so it doesn't reach whatever was under it. He stays away while a dialog is open (the scanner can
+// sit still for a long time), while the tab is hidden, and for people who ask for reduced motion he just appears,
+// without the slow lean.
 //
 // He's drawn badly on purpose: every line wobbles.
 
 const IDLE_MS = 15000;
+const CHANCE = 0.1;
 
 const SVG = `
 <svg viewBox="0 0 320 640" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -134,22 +137,47 @@ export function startHotDogMan() {
   const man = document.createElement("div");
   man.className = "hotdog-man";
   man.innerHTML = SVG;
-  document.body.append(man);
+  // While he's up, this covers the whole page so the click that sends him away lands here and nowhere else. It
+  // listens for the click itself, not pointerdown, so the whole down, up, and click sequence stays on it.
+  const shield = document.createElement("div");
+  shield.className = "hotdog-shield";
+  document.body.append(shield, man);
 
   let timer = 0;
-  const away = () => {
-    man.classList.remove("leaning");
+  let up = false;
+  const wait = () => {
     clearTimeout(timer);
     timer = setTimeout(lean, IDLE_MS);
   };
   function lean() {
-    if (document.hidden || document.querySelector("dialog[open]")) return away(); // try again later
+    if (document.hidden || document.querySelector("dialog[open]")) return wait(); // try again later
+    if (Math.random() >= CHANCE) return; // not this time; the next idle stretch gets another roll
+    up = true;
     man.classList.add("leaning");
+    shield.classList.add("up");
+  }
+  function leave() {
+    up = false;
+    man.classList.remove("leaning");
+    shield.classList.remove("up");
+    wait();
   }
 
+  // Activity while he's away restarts the idle clock. While he's up, only a click or key press counts.
   for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "scroll", "touchstart"]) {
-    addEventListener(type, away, { passive: true, capture: true });
+    addEventListener(type, () => { if (!up) wait(); }, { passive: true, capture: true });
   }
-  document.addEventListener("visibilitychange", away);
-  away();
+  shield.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    leave();
+  });
+  addEventListener("keydown", (e) => {
+    if (!up) return;
+    e.preventDefault();
+    e.stopPropagation();
+    leave();
+  }, { capture: true });
+  document.addEventListener("visibilitychange", () => { if (!up) wait(); });
+  wait();
 }

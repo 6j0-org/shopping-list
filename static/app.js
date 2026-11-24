@@ -8,8 +8,9 @@ const state = {
   items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list", me: null,
   ingredients: new Map(), // folded name -> TheMealDB ingredient name, for pantry items typed by hand
   search: { list: "", pantry: "" }, // what's typed in each page's search box
+  settings: {}, // which optional controls show; see Settings
 };
-const VIEWS = ["list", "pantry", "recipes", "feedback"];
+const VIEWS = ["list", "pantry", "recipes", "settings", "feedback"];
 const $ = (sel) => document.querySelector(sel);
 
 // ---------- API ----------
@@ -202,6 +203,40 @@ function renderEditForm(item) {
   return el("li", {}, form);
 }
 
+// ---------- Settings ----------
+// Optional controls, all off to start, saved on the server per person (they come with /api/me). Each one shows the
+// elements marked .opt-<name> (see style.css). The code behind them stays; turning one off only hides it. Quantity
+// and aisle only come off the add forms, to keep adding simple: editing an item always has both.
+const SETTINGS = { search: "show-search", quantity: "show-quantity", aisle: "show-aisle", barcodeTyping: "show-barcode-typing" };
+
+function applySettings(settings) {
+  state.settings = settings;
+  for (const box of document.querySelectorAll("[data-setting]")) box.checked = !!settings[box.dataset.setting];
+  for (const [key, cls] of Object.entries(SETTINGS)) document.documentElement.classList.toggle(cls, !!settings[key]);
+  // A search that's hidden shouldn't keep filtering.
+  if (!settings.search && (state.search.list || state.search.pantry)) {
+    state.search = { list: "", pantry: "" };
+    $("#list-search").value = $("#pantry-search").value = "";
+    render();
+  }
+}
+
+function wireSettings() {
+  for (const box of document.querySelectorAll("[data-setting]")) {
+    box.addEventListener("change", async () => {
+      const before = state.settings;
+      const change = { [box.dataset.setting]: box.checked };
+      applySettings({ ...before, ...change }); // show it now; the server's answer settles it
+      try {
+        applySettings(await api("PUT", "/api/settings", change));
+      } catch (e) {
+        applySettings(before);
+        toast(`Couldn't save that setting: ${e.message}`);
+      }
+    });
+  }
+}
+
 // ---------- Tabs ----------
 function showView(view) {
   for (const tab of document.querySelectorAll(".tab")) {
@@ -227,6 +262,7 @@ function showSignIn(error = "") {
   $(".tabs").hidden = true;
   $("#feedback-btn").hidden = true;
   $("#share-btn").hidden = true;
+  $("#siri-btn").hidden = true;
   $("#signout-btn").hidden = true;
   for (const d of document.querySelectorAll("dialog[open]")) d.close();
   stopScanner();
@@ -337,6 +373,49 @@ function wireShare() {
   }));
   // Someone else's change shows up when the dialog closes.
   $("#share").addEventListener("close", () => guard(refresh));
+}
+
+// ---------- Siri (a personal API token for an iOS Shortcut; see /api/token in server.py) ----------
+const day = (ms) => new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+
+function renderSiri({ token, created, lastUsed }) {
+  $("#siri-status").textContent = created
+    ? `You have a token, made ${day(created)}. ${lastUsed ? `Last used ${day(lastUsed)}.` : "Not used yet."}`
+    : "You don't have a token.";
+  $("#siri-make").textContent = created ? "Make a new token" : "Make a token";
+  $("#siri-revoke").hidden = !created;
+  $("#siri-new").hidden = !token;
+  $("#siri-token").textContent = token ? `Bearer ${token}` : "";
+}
+
+async function openSiri() {
+  $("#siri-url").textContent = `${location.origin}/api/shortcut/items`;
+  renderSiri(await api("GET", "/api/token"));
+  $("#siri").showModal();
+}
+
+function wireSiri() {
+  $("#siri-btn").addEventListener("click", () => guard(openSiri));
+  $("#siri-close").addEventListener("click", () => $("#siri").close());
+  $("#siri-make").addEventListener("click", () => guard(async () => {
+    if (!$("#siri-revoke").hidden &&
+        !confirm("Make a new token? The old one stops working, so shortcuts using it will need the new one.")) return;
+    renderSiri(await api("POST", "/api/token"));
+  }));
+  $("#siri-revoke").addEventListener("click", () => guard(async () => {
+    if (!confirm("Turn off the token? Shortcuts using it stop working.")) return;
+    await api("DELETE", "/api/token");
+    renderSiri({});
+    toast("Turned off the token");
+  }));
+  for (const [button, code, what] of [["#siri-copy-token", "#siri-token", "token"], ["#siri-copy-url", "#siri-url", "URL"]]) {
+    $(button).addEventListener("click", () => guard(async () => {
+      await navigator.clipboard.writeText($(code).textContent);
+      toast(`Copied the ${what}`);
+    }));
+  }
+  // Items added from a shortcut while the app was open show up when the dialog closes.
+  $("#siri").addEventListener("close", () => guard(refresh));
 }
 
 // ---------- Feedback (feedback.js draws the page; the server's feedback.py stores it) ----------
@@ -729,6 +808,8 @@ async function boot() {
   $("#signout-btn").addEventListener("click", signOut);
   $("#feedback-btn").addEventListener("click", () => showView("feedback"));
   wireShare();
+  wireSiri();
+  wireSettings();
   takeJoinCode();
 
   let signInError = "";
@@ -739,8 +820,10 @@ async function boot() {
   if (!me) return showSignIn(signInError);
   if (signInError) toast(signInError); // e.g. a stale sign-in link, while an earlier session is still good
   state.me = me;
+  applySettings(me.settings || {});
   $("#signout-btn").hidden = false;
   $("#share-btn").hidden = false;
+  $("#siri-btn").hidden = false;
   $(".tabs").hidden = false;
   $("#feedback-btn").hidden = false;
   await startList();
