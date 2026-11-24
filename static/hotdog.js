@@ -5,6 +5,9 @@
 // sit still for a long time), while the tab is hidden, and for people who ask for reduced motion he just appears,
 // without the slow lean.
 //
+// allowed() says whether he may show up at all (the "I like hot dogs" setting), and onDismiss() is told each time
+// someone sends him away.
+//
 // He's drawn badly on purpose: every line wobbles.
 
 const IDLE_MS = 15000;
@@ -133,7 +136,7 @@ const SVG = `
   </g>
 </svg>`;
 
-export function startHotDogMan() {
+export function startHotDogMan({ allowed = () => true, onDismiss = () => {} } = {}) {
   const man = document.createElement("div");
   man.className = "hotdog-man";
   man.innerHTML = SVG;
@@ -151,7 +154,7 @@ export function startHotDogMan() {
   };
   function lean() {
     if (document.hidden || document.querySelector("dialog[open]")) return wait(); // try again later
-    if (Math.random() >= CHANCE) return; // not this time; the next idle stretch gets another roll
+    if (!allowed() || Math.random() >= CHANCE) return; // not this time; the next idle stretch gets another roll
     up = true;
     man.classList.add("leaning");
     shield.classList.add("up");
@@ -161,6 +164,7 @@ export function startHotDogMan() {
     man.classList.remove("leaning");
     shield.classList.remove("up");
     wait();
+    onDismiss();
   }
 
   // Activity while he's away restarts the idle clock. While he's up, only a click or key press counts.

@@ -5,7 +5,7 @@ import { startHotDogMan } from "./hotdog.js";
 const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js";
 
 const state = {
-  items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "2", view: "list", me: null,
+  items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "1", view: "list", me: null,
   ingredients: new Map(), // folded name -> TheMealDB ingredient name, for pantry items typed by hand
   search: { list: "", pantry: "" }, // what's typed in each page's search box
   settings: {}, // which optional controls show; see Settings
@@ -204,7 +204,7 @@ function renderEditForm(item) {
 }
 
 // ---------- Settings ----------
-// Optional controls, all off to start, saved on the server per person (they come with /api/me). Each one shows the
+// Optional controls, all off to start (except Hot Dog Man), saved on the server per person (they come with /api/me). Each one shows the
 // elements marked .opt-<name> (see style.css). The code behind them stays; turning one off only hides it. Quantity
 // and aisle only come off the add forms, to keep adding simple: editing an item always has both.
 const SETTINGS = { search: "show-search", quantity: "show-quantity", aisle: "show-aisle", barcodeTyping: "show-barcode-typing" };
@@ -212,6 +212,7 @@ const SETTINGS = { search: "show-search", quantity: "show-quantity", aisle: "sho
 function applySettings(settings) {
   state.settings = settings;
   for (const box of document.querySelectorAll("[data-setting]")) box.checked = !!settings[box.dataset.setting];
+  $("#hotdogs-setting").hidden = !settings.metHotDogMan;
   for (const [key, cls] of Object.entries(SETTINGS)) document.documentElement.classList.toggle(cls, !!settings[key]);
   // A search that's hidden shouldn't keep filtering.
   if (!settings.search && (state.search.list || state.search.pantry)) {
@@ -221,19 +222,20 @@ function applySettings(settings) {
   }
 }
 
+async function saveSettings(change) {
+  const before = state.settings;
+  applySettings({ ...before, ...change }); // show it now; the server's answer settles it
+  try {
+    applySettings(await api("PUT", "/api/settings", change));
+  } catch (e) {
+    applySettings(before);
+    toast(`Couldn't save that setting: ${e.message}`);
+  }
+}
+
 function wireSettings() {
   for (const box of document.querySelectorAll("[data-setting]")) {
-    box.addEventListener("change", async () => {
-      const before = state.settings;
-      const change = { [box.dataset.setting]: box.checked };
-      applySettings({ ...before, ...change }); // show it now; the server's answer settles it
-      try {
-        applySettings(await api("PUT", "/api/settings", change));
-      } catch (e) {
-        applySettings(before);
-        toast(`Couldn't save that setting: ${e.message}`);
-      }
-    });
+    box.addEventListener("change", () => saveSettings({ [box.dataset.setting]: box.checked }));
   }
 }
 
@@ -907,5 +909,9 @@ async function startList() {
   });
 }
 
-startHotDogMan();
+startHotDogMan({
+  allowed: () => state.settings.hotDogs !== false, // on until someone signed in turns it off
+  // The first time someone signed in sends him away, the "I like hot dogs" setting appears.
+  onDismiss: () => { if (state.me && !state.settings.metHotDogMan) saveSettings({ metHotDogMan: true }); },
+});
 guard(boot);

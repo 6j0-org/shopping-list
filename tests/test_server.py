@@ -25,7 +25,8 @@ from tests.fakeid import FakeIdServer  # noqa: E402
 
 APP = "shopping-list"
 NONCE = "n" * 32
-OFF = {"search": False, "quantity": False, "aisle": False, "barcodeTyping": False}
+DEFAULTS = {"search": False, "quantity": False, "aisle": False, "barcodeTyping": False, "hotDogs": True,
+       "metHotDogMan": False}
 
 
 class ServerTest(unittest.TestCase):
@@ -127,7 +128,7 @@ class ServerTest(unittest.TestCase):
     def test_everyone_starts_with_their_own_empty_list(self):
         alice, body = self.sign_in("alice-sub")
         self.assertEqual(body, {"ok": True})
-        self.assertEqual(self.request("GET", "/api/me", sid=alice)[1], {"isAdmin": False, "settings": OFF})
+        self.assertEqual(self.request("GET", "/api/me", sid=alice)[1], {"isAdmin": False, "settings": DEFAULTS})
         self.assertEqual(self.names(alice), [])
         self.assertEqual(self.request("GET", "/api/sections", sid=alice)[0], 200)
         item = self.add(alice, "Bananas", quantity="6")
@@ -306,21 +307,25 @@ class ServerTest(unittest.TestCase):
         sid, _ = self.sign_in("settings-sub")
         self.assertEqual(self.request("PUT", "/api/settings", {"search": True})[0], 401)
         status, body, _ = self.request("PUT", "/api/settings", {"search": True, "quantity": True}, sid=sid)
-        self.assertEqual((status, body), (200, {**OFF, "search": True, "quantity": True}))
+        self.assertEqual((status, body), (200, {**DEFAULTS, "search": True, "quantity": True}))
         status, body, _ = self.request("PATCH", "/api/settings", {"quantity": False}, sid=sid)
-        self.assertEqual(body, {**OFF, "search": True}, "a change leaves the other settings alone")
+        self.assertEqual(body, {**DEFAULTS, "search": True}, "a change leaves the other settings alone")
         again, _ = self.sign_in("settings-sub")
-        self.assertEqual(self.request("GET", "/api/me", sid=again)[1]["settings"], {**OFF, "search": True},
+        self.assertEqual(self.request("GET", "/api/me", sid=again)[1]["settings"], {**DEFAULTS, "search": True},
                          "they follow the account to another session")
-        for bad in ({"colour": True}, {"search": "yes"}, {"search": 1}):
+        # Hot Dog Man starts on, and turning him off sticks.
+        status, body, _ = self.request("PUT", "/api/settings", {"metHotDogMan": True, "hotDogs": False}, sid=sid)
+        self.assertEqual(body, {**DEFAULTS, "search": True, "metHotDogMan": True, "hotDogs": False})
+        self.request("PUT", "/api/settings", {"metHotDogMan": False, "hotDogs": True}, sid=sid)
+        for bad in ({"colour": True}, {"search": "yes"}, {"search": 1}, {"hotDogs": None}):
             with self.subTest(body=bad):
                 self.assertEqual(self.request("PUT", "/api/settings", bad, sid=sid)[0], 400)
 
         # Per person, even on a shared list.
         host, _ = self.sign_in("settings-host")
         self.request("POST", "/api/list/join", {"code": self.invite(host)}, sid=sid)
-        self.assertEqual(self.request("GET", "/api/me", sid=host)[1]["settings"], OFF)
-        self.assertEqual(self.request("GET", "/api/me", sid=sid)[1]["settings"], {**OFF, "search": True})
+        self.assertEqual(self.request("GET", "/api/me", sid=host)[1]["settings"], DEFAULTS)
+        self.assertEqual(self.request("GET", "/api/me", sid=sid)[1]["settings"], {**DEFAULTS, "search": True})
 
     def shortcut(self, token, body, **headers):
         auth = {"Authorization": f"Bearer {token}"} if token else {}

@@ -85,8 +85,8 @@
         <span>Missing at most</span>
         <div class="segmented">
           <button data-missing="0">0</button>
-          <button data-missing="1">1</button>
-          <button data-missing="2" aria-pressed="true">2</button>
+          <button data-missing="1" aria-pressed="true">1</button>
+          <button data-missing="2">2</button>
           <button data-missing="3">3</button>
           <button data-missing="">Any</button>
         </div>
@@ -115,6 +115,11 @@
         <label class="setting">
           <input type="checkbox" data-setting="barcodeTyping">
           <span><b>Type barcodes</b><br><span class="muted small">Look up a barcode by its number on the Pantry page, as well as by scanning.</span></span>
+        </label>
+        <!-- Appears once you've sent Hot Dog Man away (see static/hotdog.js) -->
+        <label class="setting" id="hotdogs-setting" hidden>
+          <input type="checkbox" data-setting="hotDogs">
+          <span><b>I like hot dogs</b><br><span class="muted small">Hot Dog Man drops by now and then when you leave the app alone. Turn this off and he never comes back.</span></span>
         </label>
       </div>
     </section>

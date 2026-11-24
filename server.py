@@ -256,9 +256,16 @@ def erase_account(sub):
 
 # --- Settings -------------------------------------------------------------
 # Which optional controls the app shows (the Settings tab). Per person, not per list, so people sharing a list can
-# set them differently. All off to start.
+# set them differently. Each name maps to its default.
 
-SETTINGS = ("search", "quantity", "aisle", "barcodeTyping")
+SETTINGS = {
+    "search": False,
+    "quantity": False,
+    "aisle": False,
+    "barcodeTyping": False,
+    "hotDogs": True,  # Hot Dog Man may show up; turned off, he never does
+    "metHotDogMan": False,  # has clicked him away once, which is when the hotDogs setting appears
+}
 
 
 def get_settings(user):
@@ -270,7 +277,7 @@ def get_settings(user):
         saved = {}
     if not isinstance(saved, dict):
         saved = {}
-    return {k: saved.get(k) is True for k in SETTINGS}
+    return {k: saved[k] if isinstance(saved.get(k), bool) else default for k, default in SETTINGS.items()}
 
 
 def update_settings(user, data):
