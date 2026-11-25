@@ -214,7 +214,8 @@ list splits each ingredient line it writes ("1 (8 oz.) pkg. cream cheese, soften
 - At most 30 requests a day per account and 500 in all (`RECIPE_LIMITS`). The generator works on one request at a time,
   queues two more (`RECIPEGEN_QUEUE`), and answers 503 ("busy") beyond that.
 
-The generator listens on port 8001 (`RECIPEGEN_HOST`, `RECIPEGEN_PORT`; `RECIPEGEN_THREADS` sets PyTorch's threads) and
+The generator listens on port 8001 (`RECIPEGEN_LISTEN_HOST`, `RECIPEGEN_LISTEN_PORT`; not `RECIPEGEN_PORT`, which
+Kubernetes sets for a Service named recipegen; `RECIPEGEN_THREADS` sets PyTorch's threads) and
 has no sign-in of its own, so only the shopping list should be able to reach it. Its image downloads the model (about
 900 MB, pinned to a commit with `MODEL_REVISION`) while building. Measured on one CPU thread: three recipes take 10–30
 seconds (more threads barely help), and memory peaks at about 1.4 GB, so give it 1 CPU and 2 GB:

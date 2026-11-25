@@ -157,8 +157,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    host = os.environ.get("RECIPEGEN_HOST", "127.0.0.1")
-    port = int(os.environ.get("RECIPEGEN_PORT", "8001"))
+    # Not RECIPEGEN_PORT: Kubernetes sets that (to "tcp://10.x.x.x:8001") in every pod of a namespace with a Service
+    # named recipegen, this one's included, and it overrides the image's own environment.
+    host = os.environ.get("RECIPEGEN_LISTEN_HOST", "127.0.0.1")
+    port = int(os.environ.get("RECIPEGEN_LISTEN_PORT", "8001"))
     print(f"loading {MODEL} at {REVISION[:12]}…", flush=True)
     load()
     print(f"recipe generator on http://{host}:{port}", flush=True)
