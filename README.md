@@ -1,13 +1,13 @@
 # Shopping List
 
-A small self-hosted shopping list. Python 3's standard library, plus [`cryptography`](https://cryptography.io/) to check sign-in tokens and [`anthropic`](https://github.com/anthropics/anthropic-sdk-python) to read recipes with Claude. Meal ideas come from a small recipe model in its own container ([`recipegen/`](#generating-meal-ideas)).
+A small self-hosted shopping list. Python 3's standard library, plus [`cryptography`](https://cryptography.io/) to check sign-in tokens and [`anthropic`](https://github.com/anthropics/anthropic-sdk-python) to read recipes with Claude.
 
-- Add, edit (tap an item), check off, and delete items. The search box at the top of the List and Pantry pages (turned on in Settings) narrows them to items whose name contains every word you type. Name fields suggest the names already in use (the recipe book's ingredients, and what's on your list and in your pantry) as you type. A name changed when editing an item is checked against them, so it's spelled the same way each time: a name you haven't used before offers the closest few, or to save it anyway. Names typed into the add forms are added as typed; the same check is there, but turned off (`CHECK_WHEN_ADDING` in `static/app.js`), because its matches weren't good enough.
+- Add, edit (tap an item), check off, and delete items. The search box at the top of the List and Pantry pages (turned on in Settings) narrows them to items whose name contains every word you type. Names are saved as typed.
 - Quantity is free text: `2`, `2oz`, `a fuckton`, whatever. You set it by editing an item; the add forms only ask for it with "Quantity when adding" turned on in Settings.
 - Items are grouped and sorted by store aisle (Produce → Bakery → Deli → Meat → Dairy → Frozen → … → Pet). The aisle is guessed from the name (`sections.py`); you can override it per item by editing it (or when adding, with "Aisle when adding" turned on in Settings), and an override sticks when you rename the item.
 - **Pantry** tab: scan barcodes with your phone camera to record what you already have. The camera stays on: each product it finds in the barcode databases goes straight into the pantry with a beep, so you can scan one item after another. Scanning something already in the pantry raises its quantity instead of adding it twice: "400 g" becomes "2 × 400 g", then "3 × 400 g". A barcode the databases don't know gets a low beep instead: set that item aside, keep scanning, and add the set-aside items by hand when you close the scanner. The pantry lists the newest items first, so a bad scan is easy to spot and delete. The 🛒 button on a pantry item adds it to the shopping list.
 - **Settings** tab: turn on the extras that are hidden to keep things simple: search, a quantity box and an aisle menu on the add forms, and typing a barcode number on the Pantry page. All are off to start, and they're saved with each person's account, so they follow you across devices and people sharing a list can set them differently. Turning one off only hides it; nothing already saved changes.
-- **Recipes** tab: one recipe book that everyone who uses the app shares. Add a recipe three ways: write it yourself; paste a link and Claude reads the page and writes it up the same way every time (a title, servings, ingredients with amount, name, and a note like "chopped", and numbered steps), with a link back to the original and no photos (if a site won't let the server read it, paste the recipe's text instead); or **Suggest meals**: pick ingredients from your pantry (or type some), a small recipe model writes three ideas, and the one you pick opens in the editor to check over and save. Only the person who added a recipe (and the admin) can edit or delete it. Each recipe shows which ingredients your pantry covers, with the fewest missing first; choose how many missing ingredients are OK (0–3 or any). "Add N missing to list" puts what you lack on the shopping list.
+- **Recipes** tab: one recipe book that everyone who uses the app shares. Add a recipe two ways: write it yourself, or paste a link and Claude reads the page and writes it up the same way every time (a title, servings, ingredients with amount, name, and a note like "chopped", and numbered steps), with a link back to the original and no photos (if a site won't let the server read it, paste the recipe's text instead). Only the person who added a recipe (and the admin) can edit or delete it. Each recipe shows which ingredients your pantry covers, with the fewest missing first; choose how many missing ingredients are OK (0–3 or any). "Add N missing to list" puts what you lack on the shopping list.
 - **Accounts:** people sign in with an anonymous identity from a [6j0.org identity server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one passkey (or username and password) covers every 6j0.org app. Everyone who signs in gets their own list and pantry, empty to start.
 - **Share** button: make an invite link and send it to someone (a household, say). When they open it and choose Join, you share one list and pantry. Each link works once, for 7 days. Anyone on a list can invite people, take people off it, or leave; whoever is taken off or leaves starts over with an empty list.
 - **Siri** button: make a personal token so an iPhone or iPad shortcut can add items when you ask Siri ("Hey Siri, add to shopping list"). The dialog walks through building the shortcut. The token can only add items to your list (`POST /api/shortcut/items`), and it follows you if you join someone else's list. Making a new one replaces the old one, and you can turn it off. Names from Siri lose dictation's trailing period and take your list's spelling when it already uses the name ("peanut butter." becomes "Peanut Butter").
@@ -48,7 +48,6 @@ Every option can also be set with an environment variable (`python3 server.py --
 | `ADMIN_SUB` | unset | The 6j0.org identity that can close and delete anyone's feedback, and whose posts and replies are labeled "Developer". |
 | `ORIGIN` | unset | This app's public origin, e.g. `https://shopping-list.6j0.org`. `https:` turns on `Secure` cookies. |
 | `ANTHROPIC_API_KEY` | unset | A [Claude API](https://platform.claude.com/) key, for importing recipes ([getting one](#getting-an-anthropic-api-key)). Without it, the import box is hidden. |
-| `RECIPEGEN_URL` | unset | The [recipe generator](#generating-meal-ideas), e.g. `http://recipegen:8001`. Without it, the Suggest meals button is hidden. |
 
 To try it locally, run the identity server on `localhost` and this app on `127.0.0.1` (cookies ignore the port, so
 two apps on one hostname would overwrite each other's session cookie):
@@ -105,12 +104,11 @@ the same file those apps use, unchanged (style it with the `fb-*` classes in `st
 python3 -m unittest discover -s tests -t .
 ```
 
-`tests/test_recipes.py` tests reading recipe pages, matching, splitting generated ingredient lines, and the parts of
-`recipegen/server.py` that don't need the model, without the network, Claude, or PyTorch.
+`tests/test_recipes.py` tests reading recipe pages and matching, without the network or Claude.
 `tests/test_feedback.py` tests `feedback.py` on its own (a port of the Node apps' feedback test, plus checks that it
 reads files the Node version wrote). `tests/test_idtoken.py` and `tests/test_server.py` run against a stand-in
 identity server (`tests/fakeid.py`) that signs tokens like the real one: sign-in, a list per person, invites, the
-upgrade from one shared list, the shared recipe book (with Claude and the generator stubbed out), feedback, identity
+upgrade from one shared list, the shared recipe book (with Claude stubbed out), feedback, identity
 deletion, and refused tokens.
 
 ### Container
@@ -175,11 +173,11 @@ Scanning uses the browser's built-in `BarcodeDetector` (Chrome/Android). On iOS 
 
 ## Recipes
 
-There's one recipe book (the `recipe_book` table) for everyone who uses the app. A recipe is
-`{title, servings, source, origin, ingredients: [{quantity, name, note}], steps: [...]}`, where `origin` is `hand`,
-`link`, or `generated`. Each recipe records who added it; only they and `ADMIN_SUB` can change or delete it, and the
-API shows only whether you may (`mine`, `canEdit`), never who. When an identity is deleted its recipes stay, without an
-author. Which ingredients you have comes from your own list's pantry.
+There's one recipe book (the `recipe_book` table) for everyone who uses the app. A recipe is `{title, servings,
+source, origin, ingredients: [{quantity, name, note}], steps: [...]}`, where `origin` is `hand`, `link`, or
+`generated` (saved from a recipe generator the app no longer has). Each recipe records who added it; only they and
+`ADMIN_SUB` can change or delete it, and the API shows only whether you may (`mine`, `canEdit`), never who. When an
+identity is deleted its recipes stay, without an author. Which ingredients you have comes from your own list's pantry.
 
 **Importing** (`recipes.py`): the server fetches the pasted link and keeps only what describes the recipe: the page's
 [schema.org `Recipe`](https://schema.org/Recipe) data (JSON-LD, which most recipe sites include) without its photos,
@@ -227,38 +225,6 @@ envSecret:
 
 Save, commit, and push. Flux decrypts it, the app restarts, and the import box appears on the Recipes tab.
 
-### Generating meal ideas
-
-**Suggest meals** sends the ingredients you pick (up to 15) to the recipe generator, a small HTTP service in
-`recipegen/` around [Chef Transformer](https://huggingface.co/flax-community/t5-recipe-generation), a T5 model of
-about 200 million parameters trained on [RecipeNLG](https://recipenlg.cs.put.poznan.pl/). It runs on CPU-only PyTorch in
-its own container, so the app's image stays small. It samples three recipes at a time, so each try differs. The shopping
-list splits each ingredient line it writes ("1 (8 oz.) pkg. cream cheese, softened") into amount, name, and note
-(`recipes.parse_ingredient`). Nothing is saved until you pick one and save it from the editor.
-
-- The model often writes odd recipes: amounts that don't add up, repeated steps, or cooking times you'd want to
-  check. RecipeNLG's text also lost its slashes and apostrophes ("12 cup" for 1/2 cup, "johnny s"); the readings that
-  can't be anything else are repaired. Suggestions say so, and saved ones are marked "Generated".
-- RecipeNLG's terms allow non-commercial research and educational use only, and neither model card states a licence of
-  its own. Fine for a family shopping list; check before using it for anything commercial.
-- At most 30 requests a day per account and 500 in all (`RECIPE_LIMITS`). The generator works on one request at a time,
-  queues two more (`RECIPEGEN_QUEUE`), and answers 503 ("busy") beyond that.
-
-The generator listens on port 8001 (`RECIPEGEN_LISTEN_HOST`, `RECIPEGEN_LISTEN_PORT`; not `RECIPEGEN_PORT`, which
-Kubernetes sets for a Service named recipegen; `RECIPEGEN_THREADS` sets PyTorch's threads) and
-has no sign-in of its own, so only the shopping list should be able to reach it. Its image downloads the model (about
-900 MB, pinned to a commit with `MODEL_REVISION`) while building. Measured on one CPU thread: three recipes take 10–30
-seconds (more threads barely help), and memory peaks at about 1.4 GB, so give it 1 CPU and 2 GB:
-
-```sh
-docker build -t recipegen recipegen/
-docker run --rm -p 127.0.0.1:8001:8001 recipegen
-curl -s localhost:8001/generate -d '{"ingredients": ["chicken", "rice", "broccoli"], "count": 1}'
-RECIPEGEN_URL=http://127.0.0.1:8001 ID_ORIGIN=http://localhost:4000 python3 server.py
-```
-
-CI builds it alongside the app's image, as `<image>-recipegen` on ghcr.io and `<image>/recipegen` on GitLab.
-
 ### Matching
 
 Matching happens locally (`recipes.match`):
@@ -296,10 +262,8 @@ takes an API token instead) needs a session; without one it answers 401. Items a
 | POST | `/api/items/clear-checked` | Deletes checked shopping-list items |
 | GET | `/api/sections` | Aisle order |
 | GET | `/api/barcode/:code` | `{found, name, quantity, source}` |
-| GET | `/api/ingredients` | `{ingredients}`: the names in use (the recipe book's ingredients and your list's items), sorted, for suggesting item names |
-| GET | `/api/recipes?max_missing=N` | `{recipes, count, pantry_size, staples, canImport, canGenerate}`: the recipe book, each recipe with its ingredients marked against your pantry, fewest missing first, and `mine` and `canEdit`. `max_missing` leaves out recipes missing more |
-| POST | `/api/recipes` | A recipe (written by hand, or a generated draft with `origin: "generated"`) → the recipe with its `id` |
-| POST | `/api/recipes/generate` | `{ingredients: [name]}` (1 to 15) → `{recipes}`: up to three drafts from the recipe generator, not saved (429 over the daily limits, 502 or 503 when the generator is down or busy, 503 without `RECIPEGEN_URL`) |
+| GET | `/api/recipes?max_missing=N` | `{recipes, count, pantry_size, staples, canImport}`: the recipe book, each recipe with its ingredients marked against your pantry, fewest missing first, and `mine` and `canEdit`. `max_missing` leaves out recipes missing more |
+| POST | `/api/recipes` | A recipe → the recipe with its `id` |
 | POST | `/api/recipes/import` | `{url}` or `{text}` → the recipe Claude read, added to the book (422 when there's no recipe, 429 over the daily limits, 503 without `ANTHROPIC_API_KEY`) |
 | GET | `/api/recipes/:id` | A recipe |
 | PUT | `/api/recipes/:id` | A whole recipe, replacing it (403 unless you added it, or are `ADMIN_SUB`) |

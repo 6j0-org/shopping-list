@@ -30,7 +30,6 @@ async function api(method, path, body) {
 async function refresh() {
   state.items = await api("GET", "/api/items");
   render();
-  loadIngredients().catch(() => {}); // the names the list uses change as items come and go
 }
 
 function toast(msg) {
@@ -166,7 +165,6 @@ function renderEditForm(item) {
   const select = el("select", { name: "section", "aria-label": "Store section" });
   sectionOptions(select, { selected: item.section_auto ? "auto" : item.section, includePantry: true });
   const cancel = () => { state.editing = null; render(); };
-  const panel = el("div", { class: "suggest", role: "group", "aria-live": "polite", hidden: true });
   const save = (name) => guard(async () => {
     await api("PUT", `/api/items/${item.id}`, {
       name,
@@ -182,20 +180,13 @@ function renderEditForm(item) {
     onsubmit: (e) => {
       e.preventDefault();
       const typed = form.name.value.trim();
-      if (!typed) return;
-      // Only a new name is matched, so changing the quantity of a scanned "Brand Product" doesn't ask about it.
-      if (typed === item.name) return save(typed);
-      matchName(typed, panel, save, "Save");
+      if (typed) save(typed);
     },
     onkeydown: (e) => { if (e.key === "Escape") cancel(); },
   },
-    el("input", {
-      name: "name", value: item.name, required: true, maxlength: 200, "aria-label": "Item name", list: "ingredients",
-      oninput: () => hidePanel(panel),
-    }),
+    el("input", { name: "name", value: item.name, required: true, maxlength: 200, "aria-label": "Item name" }),
     el("input", { name: "quantity", value: item.quantity, maxlength: 200, placeholder: "Quantity", "aria-label": "Quantity" }),
     select,
-    panel,
     el("div", { class: "row-actions" },
       el("button", { type: "button", class: "ghost", onclick: cancel }, "Cancel"),
       el("button", { type: "submit", class: "primary" }, "Save")),
@@ -436,9 +427,9 @@ function feedbackElement() {
 }
 
 // ---------- Recipes ----------
-// The recipe book everyone shares. A recipe is written by hand, imported from a link or pasted text (the server has
-// Claude read it), or picked from the meal ideas the recipe generator writes. Only the person who added a recipe (and
-// the admin) can edit or delete it. Each one shows which ingredients your pantry covers.
+// The recipe book everyone shares. A recipe is written by hand, or imported from a link or pasted text (the server has
+// Claude read it). Only the person who added a recipe (and the admin) can edit or delete it. Each one shows which
+// ingredients your pantry covers.
 async function loadRecipes() {
   if (state.recipeEditing) return; // don't throw away an open editor
   const note = $("#recipes-note");
@@ -448,7 +439,6 @@ async function loadRecipes() {
   if (state.recipeEditing) return;
 
   $("#import-form").hidden = !data.canImport;
-  $("#suggest-meals").hidden = !data.canGenerate;
   state.staples = new Set(data.staples.map(fold));
   const open = new Set([...document.querySelectorAll("#recipes [data-id][open]")].map((d) => d.dataset.id));
   $("#recipes").replaceChildren(...data.recipes.map((r) => renderRecipe(r, open.has(String(r.id)))));
@@ -555,7 +545,7 @@ function recipeEditor(r, { save, done }) {
   const addRow = (i = { quantity: "", name: "", note: "" }) => {
     const row = el("div", { class: "ing-row" },
       el("input", { name: "quantity", value: i.quantity, maxlength: 100, placeholder: "Amount", "aria-label": "Amount" }),
-      el("input", { name: "name", value: i.name, maxlength: 200, placeholder: "Ingredient", "aria-label": "Ingredient", list: "ingredients" }),
+      el("input", { name: "name", value: i.name, maxlength: 200, placeholder: "Ingredient", "aria-label": "Ingredient" }),
       el("input", { name: "note", value: i.note, maxlength: 200, placeholder: "Note (chopped…)", "aria-label": "Note" }),
       el("button", { type: "button", class: "small ghost", "aria-label": "Remove ingredient", onclick: () => row.remove() }, "✕"));
     rows.append(row);
@@ -605,95 +595,19 @@ function recipeEditor(r, { save, done }) {
   return form;
 }
 
-// Opens the editor for a new recipe: blank, or a draft from the recipe generator to check over and save.
-function writeRecipe(draft) {
+// Opens the editor for a new, blank recipe.
+function writeRecipe() {
   if (state.recipeEditing) return;
-  const recipe = draft || { title: "", servings: "", source: "", origin: "hand", ingredients: [], steps: [] };
+  const recipe = { title: "", servings: "", source: "", origin: "hand", ingredients: [], steps: [] };
   $("#recipe-new").replaceChildren(el("div", { class: "card" },
-    draft ? el("p", { class: "muted small" },
-      "A recipe model wrote this. Fix anything odd (amounts, times, temperatures, and steps that don't fit), then save it.") : null,
     recipeEditor(recipe, {
       save: async (data) => {
         const saved = await api("POST", "/api/recipes", data);
         toast(`Added ${saved.title}`);
-        if (draft) closeSuggest();
       },
       done: () => { $("#recipe-new").replaceChildren(); guard(loadRecipes); },
     })));
   $("#recipe-new").scrollIntoView({ block: "start", behavior: "smooth" });
-}
-
-// ---------- Meal ideas ----------
-// Pick ingredients (your pantry's, newest first, and any typed in) and the recipe generator writes a few recipes that
-// use some of them. None is saved until you pick one, check it over in the editor, and save it.
-const MAX_SUGGEST_INGREDIENTS = 15;
-
-function openSuggest() {
-  const form = $("#suggest");
-  const seen = new Set();
-  const names = state.items.filter((i) => i.section === state.pantry).map((i) => i.name).filter((n) => {
-    const key = fold(n);
-    if (seen.has(key) || state.staples?.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  $("#suggest-picks").replaceChildren(...names.map((n, index) => el("button", {
-    type: "button", class: "chip", "aria-pressed": String(index < 6),
-    onclick: (e) => e.currentTarget.setAttribute("aria-pressed", String(e.currentTarget.getAttribute("aria-pressed") !== "true")),
-  }, n)));
-  if (!names.length) $("#suggest-picks").replaceChildren(el("p", { class: "muted small" }, "Your pantry is empty, so type some ingredients below."));
-  $("#suggestions").replaceChildren();
-  form.querySelector("[type=submit]").textContent = "Suggest meals";
-  form.hidden = false;
-  form.scrollIntoView({ block: "start", behavior: "smooth" });
-}
-
-function closeSuggest() {
-  $("#suggest").hidden = true;
-  $("#suggestions").replaceChildren();
-}
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-function renderSuggestion(draft) {
-  const names = draft.ingredients.map((i) => i.name);
-  return el("div", { class: "suggestion" },
-    el("div", {},
-      el("div", { class: "title" }, draft.title),
-      el("div", { class: "meta" }, `${plural(names.length, "ingredient")}, ${plural(draft.steps.length, "step")}: ` +
-        `${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}`)),
-    el("button", { type: "button", onclick: () => writeRecipe(draft) }, "Use this"));
-}
-
-function wireSuggest() {
-  const form = $("#suggest");
-  $("#suggest-meals").addEventListener("click", openSuggest);
-  $("#suggest-close").addEventListener("click", closeSuggest);
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const picked = [...form.querySelectorAll(".chip[aria-pressed=true]")].map((b) => b.textContent);
-    const extra = form.extra.value.split(",").map((s) => s.trim()).filter(Boolean);
-    const ingredients = [...new Map([...picked, ...extra].map((n) => [fold(n), n])).values()];
-    if (!ingredients.length) return toast("Pick or type at least one ingredient");
-    if (ingredients.length > MAX_SUGGEST_INGREDIENTS) return toast(`Pick at most ${MAX_SUGGEST_INGREDIENTS} ingredients`);
-    const button = form.querySelector("[type=submit]");
-    guard(async () => {
-      button.disabled = true;
-      button.textContent = "Thinking up meals…";
-      $("#suggestions").replaceChildren(el("p", { class: "muted small" }, "This can take a minute."));
-      try {
-        const data = await api("POST", "/api/recipes/generate", { ingredients });
-        $("#suggestions").replaceChildren(...data.recipes.map(renderSuggestion));
-        button.textContent = "Suggest others";
-      } catch (err) {
-        $("#suggestions").replaceChildren();
-        button.textContent = "Suggest meals";
-        throw err;
-      } finally {
-        button.disabled = false;
-      }
-    });
-  });
 }
 
 // Pasted text that's just a link is fetched by the server; anything else is read as the recipe itself.
@@ -722,78 +636,16 @@ function wireRecipes() {
     });
   });
   $("#write-recipe").addEventListener("click", () => writeRecipe());
-  wireSuggest();
 }
 
 // ---------- Adding items by hand ----------
-// Names typed into the shopping list or the pantry are matched against the names the list already uses (its recipes'
-// ingredients, and its items), so they're spelled the same way each time and recipes find them. Those names fill
-// the name fields' suggestions as you type. A name that isn't one of them gets the closest few to pick from, or can
-// be saved as typed.
-//
-// Turned off for the add forms (CHECK_WHEN_ADDING): the matches weren't good enough, so names are added as typed.
-// The suggestions as you type, and the check when renaming an item, still work.
-const CHECK_WHEN_ADDING = false;
+// Names are added as typed.
 const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-async function loadIngredients() {
-  const { ingredients } = await api("GET", "/api/ingredients");
-  state.ingredients = new Map(ingredients.map((n) => [fold(n), n]));
-  $("#ingredients").replaceChildren(...ingredients.map((n) => el("option", { value: n })));
-}
-
-function editDistance(a, b) {
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = cur;
-  }
-  return prev[b.length];
-}
-
-// The ingredients closest to a typed name: ones containing every typed word first (shortest first), then typos.
-function closestIngredients(name, limit = 3) {
-  const typed = fold(name);
-  const words = typed.split(" ").filter(Boolean);
-  const scored = [];
-  for (const [key, display] of state.ingredients) {
-    const keyWords = key.split(" ");
-    const hasAll = words.every((w) => keyWords.some((k) => k.startsWith(w)));
-    const similarity = 1 - editDistance(typed, key) / Math.max(typed.length, key.length);
-    if (hasAll) scored.push({ display, score: 2 - key.length / 100 });
-    else if (similarity >= 0.6) scored.push({ display, score: similarity });
-  }
-  return scored.sort((a, b) => b.score - a.score).slice(0, limit).map((s) => s.display);
-}
-
-const hidePanel = (panel) => { panel.hidden = true; panel.replaceChildren(); };
-
-// Calls save(name) with the list's spelling when the typed name is on it (or when the list didn't load, as typed, so
-// nothing is blocked). Otherwise fills panel with the closest names and "<verb> anyway", each of which calls save.
-function matchName(typed, panel, save, verb = "Add") {
-  if (!state.ingredients.size) return save(typed);
-  const exact = state.ingredients.get(fold(typed));
-  if (exact) return save(exact);
-  const close = closestIngredients(typed);
-  panel.replaceChildren(
-    el("p", {}, close.length ? `“${typed}” isn't a name you've used before. Did you mean:` : `“${typed}” isn't a name you've used before.`),
-    ...close.map((n) => el("button", { type: "button", class: "small", onclick: () => save(n) }, n)),
-    el("button", { type: "button", class: "small ghost", onclick: () => save(typed) }, `${verb} “${typed}” anyway`),
-  );
-  panel.hidden = false;
-  panel.querySelector("button").focus();
-}
-
-// save(name) adds the item with the form's other fields; panel shows the "isn't in the food list" choices.
-function wireAddForm(form, panel, save) {
-  form.name.addEventListener("input", () => hidePanel(panel));
-
+// save(name) adds the item with the form's other fields.
+function wireAddForm(form, save) {
   const add = (name) => guard(async () => {
     await save(name);
-    hidePanel(panel);
     form.reset();
     if (form.section) form.section.value = "auto";
     form.name.focus();
@@ -802,9 +654,7 @@ function wireAddForm(form, panel, save) {
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const typed = form.name.value.trim();
-    if (!typed) return;
-    if (CHECK_WHEN_ADDING) matchName(typed, panel, add);
-    else add(typed);
+    if (typed) add(typed);
   });
 }
 
@@ -1166,12 +1016,12 @@ async function startList() {
 
   wireSearch($("#list-search"), "list");
   wireSearch($("#pantry-search"), "pantry");
-  wireAddForm($("#add-form"), $("#list-suggest"), async (name) => {
+  wireAddForm($("#add-form"), async (name) => {
     const form = $("#add-form");
     await api("POST", "/api/items", { name, quantity: form.quantity.value, section: form.section.value });
     await refresh();
   });
-  wireAddForm($("#pantry-add-form"), $("#pantry-suggest"), async (name) => {
+  wireAddForm($("#pantry-add-form"), async (name) => {
     await addToPantry(name, $("#pantry-add-form").quantity.value);
     toast(`Added ${name} to pantry`);
   });

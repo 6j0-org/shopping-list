@@ -1,7 +1,6 @@
-# Builds the shopping list image and the recipe generator's (recipegen/) and publishes them
-# to the GitHub Container Registry (ghcr.io/<owner>/<repo> and ghcr.io/<owner>/<repo>-recipegen).
-# Pull requests only build; pushes to main publish :latest and :sha-<short>, and v* tags
-# publish the version tags.
+# Builds the shopping list image and publishes it to the GitHub Container Registry
+# (ghcr.io/<owner>/<repo>). Pull requests only build; pushes to main publish
+# :latest and :sha-<short>, and v* tags publish the version tags.
 name: Image
 
 on:
@@ -22,13 +21,6 @@ concurrency:
 jobs:
   image:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - context: .
-            suffix: ''
-          - context: recipegen
-            suffix: -recipegen
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +39,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
@@ -58,10 +50,10 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
+          context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=image${{ matrix.suffix }}
-          cache-to: type=gha,mode=max,scope=image${{ matrix.suffix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,15 +1,11 @@
-"""The recipe book: matching recipes against the pantry, reading a recipe from a web page (or pasted text) with
-Claude, and asking the recipe generator (recipegen/) for meal ideas.
+"""The recipe book: matching recipes against the pantry, and reading a recipe from a web page (or pasted text) with
+Claude.
 
 Every recipe has one shape: a title, servings, ingredients (quantity, a plain name a shopper would look for, and a
 note), and numbered steps. Storage is in server.py.
 
 Importing fetches the page, keeps only what describes the recipe (the page's schema.org Recipe data when it has
 some, its text otherwise; never photos), and asks Claude to put it in that shape.
-
-Generating sends ingredient names to the recipe generator, a small model (Chef Transformer, a T5 trained on
-RecipeNLG) in its own container, and splits each ingredient line it writes ("1 (8 oz.) pkg. cream cheese,
-softened") into quantity, name, and note.
 """
 
 import html.parser
@@ -31,7 +27,7 @@ MAX_TEXT_CHARS = 80_000  # what's sent to Claude, about 20,000 tokens
 
 # Things nearly every kitchen has; never counted as missing.
 STAPLES = {"salt", "pepper", "black pepper", "water", "ice", "boiling water", "cold water",
-           "salt pepper"}  # "salt and pepper" once normalize() drops "and"; generated recipes often say it
+           "salt pepper"}  # "salt and pepper" once normalize() drops "and"; recipes often say it
 
 # Words that describe an ingredient rather than identify it.
 DESCRIPTORS = set("""
@@ -128,7 +124,7 @@ def match(recipes, pantry_names, max_missing=None):
 
 
 class RecipeError(Exception):
-    """Something to tell the person: the page can't be fetched, isn't a recipe, the generator is busy, and so on."""
+    """Something to tell the person: the page can't be fetched, or isn't a recipe, and so on."""
 
     def __init__(self, message, status=422):
         super().__init__(message)
@@ -433,131 +429,3 @@ def import_recipe(url=None, text=None):
         "steps": [clip(s, 2000) for s in data.get("steps", [])[:100] if clip(s, 2000)],
     }
 
-
-# --- Generating -----------------------------------------------------------
-
-GENERATOR_TIMEOUT = 150  # seconds: up to WAIT_SECONDS (60) queued in the generator, then 10–45 s on one CPU
-MAX_GENERATE_INGREDIENTS = 15
-
-# Words that can follow a number at the start of an ingredient line and belong to its quantity: "2 c.", "1 (16 oz.)
-# can", "1 1/2 lb.". Compared without a trailing period.
-UNITS = set("""
-    c cup cups tbsp tbs tbsps tablespoon tablespoons tsp tsps teaspoon teaspoons t
-    oz ounce ounces lb lbs pound pounds g gram grams kg ml l liter liters litre litres
-    qt quart quarts pt pint pints gal gallon gallons
-    pkg pkgs package packages can cans jar jars box boxes bottle bottles carton cartons
-    envelope envelopes stick sticks clove cloves slice slices dash dashes pinch pinches
-    bunch bunches head heads sprig sprigs handful
-""".split())
-_NUMBER = re.compile(r"^(\d+([./]\d+)?|\d*[½⅓⅔¼¾⅛]|-|to|or|x)$")
-
-
-# RecipeNLG's text lost its slashes and apostrophes, so the model writes "12 cup" for 1/2 cup, "1 12 cups" for
-# 1 1/2, "4 5" for 4-5, and "johnny s" for johnny's. Only the readings that can't be anything else are repaired: a
-# "12" before a cup or a spoon (nobody adds 12 cups of cheese), not before ounces or grams, where 12 is real.
-_FRACTIONS = {"12": "1/2", "13": "1/3", "23": "2/3", "14": "1/4", "34": "3/4", "18": "1/8", "38": "3/8", "58": "5/8",
-              "78": "7/8"}
-_SMALL_UNITS = {"c", "cup", "cups", "tbsp", "tbs", "tablespoon", "tablespoons", "tsp", "teaspoon", "teaspoons", "t"}
-
-
-def _repair_quantity(quantity):
-    words = quantity.split(" ")
-    out = []
-    for i, word in enumerate(words):
-        after = words[i + 1].lower().rstrip(".") if i + 1 < len(words) else ""
-        if word in _FRACTIONS and (out and out[-1].isdigit() or after in _SMALL_UNITS):
-            word = _FRACTIONS[word]
-        elif word.isdigit() and out and out[-1].isdigit() and int(word) > int(out[-1]):
-            out[-1] = f"{out[-1]}–{word}"
-            continue
-        out.append(word)
-    return " ".join(out)
-
-
-def _repair_text(text):
-    return re.sub(r"(\w) s\b", r"\1's", text)
-
-
-def parse_ingredient(line):
-    """{quantity, name, note} from a line like "1 (8 oz.) pkg. cream cheese, softened" or "salt to taste"."""
-    line = re.sub(r"\s+", " ", str(line)).strip(" ,.-")
-    words = line.split(" ")
-    taken, seen_number, depth = 0, False, 0
-    for word in words:
-        bare = word.lower().rstrip(".,")
-        if depth or word.startswith("("):
-            depth += word.count("(") - word.count(")")
-        elif _NUMBER.match(bare) and (seen_number or bare[0].isdigit() or bare[0] in "½⅓⅔¼¾⅛"):
-            seen_number = True
-        elif not (seen_number and bare in UNITS):
-            break
-        taken += 1
-    if not seen_number:
-        taken = 0
-    quantity = _repair_quantity(" ".join(words[:taken]).strip(" ,"))
-    rest = _repair_text(" ".join(words[taken:]))
-    name, _, note = rest.partition(",")
-    name, note = name.strip(), note.strip()
-    taste = re.search(r"\s+(to taste|as needed|\(optional\)|optional)$", name, re.I)
-    if taste:
-        name, note = name[:taste.start()].strip(), ", ".join(filter(None, [taste.group(1).strip("()"), note]))
-    return {"quantity": quantity[:100], "name": name[:200], "note": note[:200]}
-
-
-def _sentence(text):
-    text = _repair_text(re.sub(r"\s+", " ", str(text)).strip())
-    return text[:1].upper() + text[1:] if text else ""
-
-
-def draft_from_generated(raw):
-    """A generated recipe ({title, ingredients: [line], directions: [str]}) as a draft in the book's shape."""
-    seen, ingredients = set(), []
-    for line in raw.get("ingredients", [])[:100]:
-        ing = parse_ingredient(line)
-        key = (ing["quantity"].lower(), ing["name"].lower())
-        if ing["name"] and key not in seen:  # the model sometimes repeats a line
-            seen.add(key)
-            ingredients.append(ing)
-    steps = []
-    for step in raw.get("directions", [])[:100]:
-        step = _sentence(step)[:2000]
-        if step and step not in steps:
-            steps.append(step)
-    return {"title": _sentence(raw.get("title", ""))[:200], "servings": "", "source": "", "origin": "generated",
-            "ingredients": ingredients, "steps": steps}
-
-
-def generator_url():
-    return os.environ.get("RECIPEGEN_URL", "").rstrip("/")
-
-
-def can_generate():
-    return bool(generator_url())
-
-
-def ask_generator(ingredients, count):
-    """The generator's raw recipes for some ingredient names. It runs inside the cluster, so this is a plain request,
-    not the public-addresses-only opener that fetches pasted links."""
-    body = json.dumps({"ingredients": ingredients, "count": count}).encode()
-    request = urllib.request.Request(generator_url() + "/generate", data=body,
-                                     headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=GENERATOR_TIMEOUT) as response:
-            return json.load(response)["recipes"]
-    except urllib.error.HTTPError as e:
-        if e.code == 503:
-            raise RecipeError("The recipe generator is busy. Try again in a minute.", 503)
-        print(f"recipe generator: HTTP {e.code}", flush=True)
-    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
-        print(f"recipe generator: {e}", flush=True)
-    raise RecipeError("The recipe generator isn't answering right now. Try again later.", 502)
-
-
-def generate(ingredients, count=3):
-    """Up to `count` different recipe drafts that use some of the ingredients. Not stored; the person picks one,
-    checks it, and saves it."""
-    drafts = [draft_from_generated(r) for r in ask_generator(ingredients, count)]
-    drafts = [d for d in drafts if d["title"] and d["ingredients"] and d["steps"]]
-    if not drafts:
-        raise RecipeError("The generator didn't come up with anything usable. Try again, or with other ingredients.")
-    return drafts

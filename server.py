@@ -39,9 +39,9 @@ SESSION_MS = SESSION_DAYS * 86400 * 1000
 INVITE_DAYS = 7
 INVITE_MS = INVITE_DAYS * 86400 * 1000
 DAY_MS = 86400 * 1000
-# Daily limits on recipe imports (each a paid Claude API call) and generations (each ties up the recipe generator for
-# a while), per account and for everyone together: kind -> (per account, everyone).
-RECIPE_LIMITS = {"import": (20, 200), "generate": (30, 500)}
+# Daily limits on recipe imports (each a paid Claude API call), per account and for everyone together:
+# kind -> (per account, everyone).
+RECIPE_LIMITS = {"import": (20, 200)}
 
 _db_lock = threading.Lock()
 _db = None
@@ -128,7 +128,7 @@ def init_db(path):
             created INTEGER NOT NULL,
             updated INTEGER NOT NULL
         );
-        -- When each account imported or generated recipes ("import", "generate"), for the daily limits.
+        -- When each account imported recipes ("import"), for the daily limits.
         CREATE TABLE IF NOT EXISTS recipe_uses (
             user_id INTEGER NOT NULL,
             kind    TEXT NOT NULL,
@@ -378,7 +378,7 @@ def _fold(name):
 
 
 def known_names(list_id):
-    """The names a list already uses, for suggesting and spelling item names: the recipe book's ingredients and the
+    """The names a list already uses, for spelling item names (canonical_name): the recipe book's ingredients and the
     items on its list and in its pantry. Sorted, without case-only duplicates (a recipe's spelling wins)."""
     with _db_lock:
         books = [r[0] for r in _db.execute("SELECT data FROM recipe_book")]
@@ -698,11 +698,11 @@ def lookup_barcode(code):
 
 
 # --- Recipes --------------------------------------------------------------
-# One recipe book for everyone. A recipe is written by hand, read from a link or pasted text by Claude
-# (recipes.import_recipe), or picked from the generator's suggestions (recipes.generate) and saved. Everyone can see
-# every recipe; only the person who added it, and the admin, can change or delete it. Which ingredients you have
-# comes from your own list's pantry.
+# One recipe book for everyone. A recipe is written by hand, or read from a link or pasted text by Claude
+# (recipes.import_recipe). Everyone can see every recipe; only the person who added it, and the admin, can change or
+# delete it. Which ingredients you have comes from your own list's pantry.
 
+# "generated" is for recipes saved from the recipe generator's suggestions, a feature that's since been removed.
 ORIGINS = ("hand", "link", "generated")
 
 
@@ -813,9 +813,8 @@ def delete_recipe(user, recipe_id):
 
 
 def _count_use(user, kind):
-    """Note an import or a generation, or refuse it when it's over the daily limits (RECIPE_LIMITS)."""
+    """Note an import, or refuse it when it's over the daily limits (RECIPE_LIMITS)."""
     per_account, per_day = RECIPE_LIMITS[kind]
-    verb = "imported" if kind == "import" else "asked for meal ideas"
     now = _now_ms()
     with _db_lock:
         _db.execute("DELETE FROM recipe_uses WHERE at <= ?", (now - DAY_MS,))
@@ -824,7 +823,7 @@ def _count_use(user, kind):
         everyone = _db.execute("SELECT COUNT(*) FROM recipe_uses WHERE kind = ?", (kind,)).fetchone()[0]
         if mine >= per_account:
             raise HttpError(HTTPStatus.TOO_MANY_REQUESTS,
-                            f"You've {verb} {per_account} times today. Try again tomorrow, or write a recipe in by hand.")
+                            f"You've imported {per_account} times today. Try again tomorrow, or write a recipe in by hand.")
         if everyone >= per_day:
             raise HttpError(HTTPStatus.TOO_MANY_REQUESTS,
                             "The app has done all it can of that today. Try again tomorrow, or write a recipe in by hand.")
@@ -846,21 +845,6 @@ def import_recipe(user, data):
     return create_recipe(user, recipes.import_recipe(url=url, text=text))
 
 
-def generate_recipes(user, data):
-    """Meal ideas from {ingredients: [name]}: a few recipe drafts, not stored. Saving one is a POST /api/recipes."""
-    if not recipes.can_generate():
-        raise HttpError(HTTPStatus.SERVICE_UNAVAILABLE, "Meal ideas aren't set up on this server.")
-    names = []
-    for name in _clean_list(data, "ingredients", recipes.MAX_GENERATE_INGREDIENTS):
-        name = _clean_text({"name": name}, "name", limit=100)
-        if name and name.lower() not in (n.lower() for n in names):
-            names.append(name)
-    if not names:
-        raise BadRequest("Pick at least one ingredient.")
-    _count_use(user, "generate")
-    return {"recipes": recipes.generate(names)}
-
-
 def recipe_book(user, max_missing):
     book = list_recipes(user)
     with _db_lock:
@@ -873,7 +857,6 @@ def recipe_book(user, max_missing):
         "pantry_size": len(names),
         "staples": sorted(recipes.STAPLES),
         "canImport": recipes.can_import(),
-        "canGenerate": recipes.can_generate(),
     }
 
 
@@ -1078,8 +1061,6 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send_json(HTTPStatus.CREATED, create_recipe(user, self._read_json(RECIPE_BYTES)))
             if path == "/api/recipes/import":
                 return self._send_json(HTTPStatus.CREATED, import_recipe(user, self._read_json(RECIPE_BYTES)))
-            if path == "/api/recipes/generate":
-                return self._send_json(HTTPStatus.OK, generate_recipes(user, self._read_json()))
         m = RECIPE_PATH.match(path)
         if m and method == "PUT":
             return self._send_json(HTTPStatus.OK, update_recipe(user, int(m.group(1)), self._read_json(RECIPE_BYTES)))
@@ -1122,8 +1103,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send_json(HTTPStatus.OK, list_items(list_id))
         if path == "/api/sections":
             return self._send_json(HTTPStatus.OK, {"sections": sections.SECTIONS, "pantry": sections.PANTRY})
-        if path == "/api/ingredients":
-            return self._send_json(HTTPStatus.OK, {"ingredients": known_names(list_id)})
         if path == "/api/recipes":
             raw = query.get("max_missing", [""])[0]
             max_missing = int(raw) if raw.isdigit() else None
@@ -1216,8 +1195,6 @@ def main():
         scheme = "https"
     if not recipes.can_import():
         print("ANTHROPIC_API_KEY isn't set, so recipes can't be imported from links.")
-    if not recipes.can_generate():
-        print("RECIPEGEN_URL isn't set, so the app can't suggest meals.")
     print(f"Shopping list running at {scheme}://{args.host}:{args.port}/  (sign-in: {origin} as \"{args.id_app}\")")
     try:
         httpd.serve_forever()

@@ -44,13 +44,12 @@
     <section id="view-list" class="view" hidden>
       <input type="search" id="list-search" class="search opt-search" placeholder="Search the list" aria-label="Search the list" autocomplete="off" enterkeyhint="search">
       <form id="add-form" class="add-form" autocomplete="off">
-        <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name" list="ingredients">
+        <input name="name" placeholder="Item (e.g. apples)" required maxlength="200" aria-label="Item name">
         <input name="quantity" class="opt-quantity" placeholder="Qty (e.g. 2 lb)" maxlength="200" aria-label="Quantity">
         <select name="section" class="opt-aisle" aria-label="Store section"></select>
         <button type="submit" class="primary">Add</button>
       </form>
       <!-- A typed name that isn't in the ingredient list: pick a close one, or add it as typed -->
-      <div id="list-suggest" class="suggest" role="group" aria-live="polite" hidden></div>
       <div id="list" class="groups"></div>
       <p id="list-empty" class="empty" hidden>Nothing on the list. Add something above.</p>
       <div class="footer-actions">
@@ -69,12 +68,10 @@
         </form>
       </div>
       <form id="pantry-add-form" class="add-form" autocomplete="off">
-        <input name="name" placeholder="Add pantry item by hand" required maxlength="200" aria-label="Item name" list="ingredients">
+        <input name="name" placeholder="Add pantry item by hand" required maxlength="200" aria-label="Item name">
         <input name="quantity" class="opt-quantity" placeholder="Quantity" maxlength="200" aria-label="Quantity">
         <button type="submit" class="primary">Add</button>
       </form>
-      <div id="pantry-suggest" class="suggest" role="group" aria-live="polite" hidden></div>
-      <datalist id="ingredients"></datalist>
       <div id="pantry" class="groups"></div>
       <p id="pantry-empty" class="empty" hidden>Your pantry is empty. Scan what you have.</p>
     </section>
@@ -94,23 +91,9 @@
         </form>
         <div class="row-actions start">
           <button type="button" id="write-recipe">Write one yourself</button>
-          <button type="button" id="suggest-meals" hidden>Suggest meals</button>
         </div>
         <p class="muted small">Recipes are shared with everyone who uses the app. Only you can change the ones you add.</p>
       </div>
-      <form id="suggest" class="card meal-ideas" autocomplete="off" hidden>
-        <b>Suggest meals</b>
-        <p class="muted small">Pick what to cook with. A small recipe model writes a few ideas; they're often odd, so check one over before you save it.</p>
-        <div id="suggest-picks" class="chips" role="group" aria-label="Ingredients to use"></div>
-        <label class="muted small">Anything else (separate with commas)
-          <input name="extra" maxlength="500" placeholder="chicken, rice">
-        </label>
-        <div class="row-actions">
-          <button type="button" class="ghost" id="suggest-close">Close</button>
-          <button type="submit" class="primary">Suggest meals</button>
-        </div>
-        <div id="suggestions"></div>
-      </form>
       <div id="recipe-new"></div>
       <div class="recipe-filter" role="group" aria-label="Missing ingredients allowed">
         <span>Missing at most</span>
@@ -184,7 +167,7 @@
     <form id="confirm-form" method="dialog" autocomplete="off">
       <h2>Add to pantry</h2>
       <p id="confirm-source" class="muted"></p>
-      <label>Name <input name="name" required maxlength="200" list="ingredients"></label>
+      <label>Name <input name="name" required maxlength="200"></label>
       <label class="opt-quantity">Quantity <input name="quantity" maxlength="200"></label>
       <input type="hidden" name="barcode">
       <div class="row-actions">

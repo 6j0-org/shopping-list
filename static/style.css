@@ -102,8 +102,6 @@ html:not(.show-quantity) #pantry-add-form button { grid-column: 2; }
 .add-form select { grid-column: 1; }
 .add-form button { grid-column: 2; }
 #pantry-add-form button { grid-column: 1 / -1; }
-.suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -8px 0 16px; }
-.suggest p { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 0.9rem; }
 
 .scan-bar { display: grid; gap: 8px; margin-bottom: 8px; }
 .code-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
@@ -141,7 +139,6 @@ html:not(.show-quantity) #pantry-add-form button { grid-column: 2; }
 .edit-form:first-child { border-top: 0; }
 .edit-form input[name="name"] { grid-column: 1 / -1; }
 .edit-form .row-actions { grid-column: 1 / -1; }
-.edit-form .suggest { grid-column: 1 / -1; margin: 0; }
 
 .row-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .empty { color: var(--muted); text-align: center; padding: 24px 0; }
@@ -234,19 +231,8 @@ dialog label input { color: var(--text); font-size: 1rem; }
 .import textarea, .recipe-edit textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .import p { margin: 0; }
 .import .row-actions { justify-content: flex-end; }
-.add-recipe, .meal-ideas { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
-.add-recipe > p, .meal-ideas > p { margin: 0; }
-.meal-ideas label { display: flex; flex-direction: column; gap: 4px; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chips p { margin: 0; }
-.chip { border-radius: 999px; padding: 6px 12px; font-size: 0.9rem; }
-.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-.chip[aria-pressed="true"]::before { content: "✓ "; }
-.suggestion { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--border); }
-.suggestion .title { font-weight: 600; overflow-wrap: anywhere; }
-.suggestion .meta { color: var(--muted); font-size: 0.85rem; }
-.suggestion button { flex: none; }
-#suggestions > p { margin: 0; }
+.add-recipe { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.add-recipe > p { margin: 0; }
 .recipe-edit { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
 .recipe-edit > label { display: flex; flex-direction: column; gap: 4px; }
 .recipe-edit h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 10px 0 0; }

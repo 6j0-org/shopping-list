@@ -172,20 +172,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 201, recipe)
         return recipe
 
-    def test_ingredient_list_is_the_recipe_books_and_the_lists_names(self):
-        sid, _ = self.sign_in("cook-sub")
-        self.assertEqual(self.request("GET", "/api/ingredients", sid=sid)[1], {"ingredients": []})
-        self.add_recipe(sid, ingredients=["Peanut Butter", "basmati rice"])
-        self.add(sid, "Basmati Rice")
-        self.add(sid, "Butter", section="Pantry")
-        status, body, _ = self.request("GET", "/api/ingredients", sid=sid)
-        self.assertEqual(status, 200)
-        self.assertEqual(body["ingredients"], ["basmati rice", "Butter", "Peanut Butter"],
-                         "sorted, one per name, a recipe's spelling first")
-        other, _ = self.sign_in("other-cook-sub")
-        self.assertEqual(self.request("GET", "/api/ingredients", sid=other)[1],
-                         {"ingredients": ["basmati rice", "Peanut Butter"]}, "the recipe book's names, not the other list's items")
-        self.assertEqual(self.request("GET", "/api/ingredients")[0], 401)
+    def test_name_suggestions_are_gone(self):
+        sid, _ = self.sign_in("cache-sub")
+        self.assertEqual(self.request("GET", "/api/ingredients", sid=sid)[0], 404)
 
     def test_recipe_book(self):
         sid, _ = self.sign_in("book-sub")
@@ -252,50 +241,12 @@ class ServerTest(unittest.TestCase):
             author = server._db.execute("SELECT author FROM recipe_book WHERE id = ?", (recipe["id"],)).fetchone()[0]
         self.assertIsNone(author)
 
-    def test_suggesting_meals(self):
+    def test_generated_recipes_still_save(self):
+        """Recipes saved from the removed recipe generator keep their origin, and the endpoint is gone."""
         sid, _ = self.sign_in("meals-sub")
-        raw = [{"title": "chicken and rice", "ingredients": ["1 lb. chicken breast, cubed", "2 c. rice",
-                                                            "2 c. rice", "salt to taste"],
-                "directions": ["brown the chicken.", "add rice and water.", "brown the chicken."]},
-               {"title": "", "ingredients": [], "directions": []}]
-        asked = []
-        with mock.patch.dict(os.environ, {"RECIPEGEN_URL": "http://recipegen:8001"}), \
-                mock.patch.object(recipes, "ask_generator", side_effect=lambda names, count: asked.append(names) or raw):
-            self.assertTrue(self.request("GET", "/api/recipes", sid=sid)[1]["canGenerate"])
-            status, body, _ = self.request("POST", "/api/recipes/generate",
-                                           {"ingredients": ["Chicken", " rice ", "chicken", ""]}, sid=sid)
-            self.assertEqual(status, 200, body)
-            self.assertEqual(asked, [["Chicken", "rice"]])
-            self.assertEqual(len(body["recipes"]), 1, "an empty recipe is dropped")
-            draft = body["recipes"][0]
-            self.assertEqual((draft["title"], draft["origin"], draft["source"]), ("Chicken and rice", "generated", ""))
-            self.assertEqual(draft["ingredients"], [
-                {"quantity": "1 lb.", "name": "chicken breast", "note": "cubed"},
-                {"quantity": "2 c.", "name": "rice", "note": ""},
-                {"quantity": "", "name": "salt", "note": "to taste"},
-            ])
-            self.assertEqual(draft["steps"], ["Brown the chicken.", "Add rice and water."])
-            self.assertEqual(self.request("GET", "/api/recipes", sid=sid)[1]["count"], 0, "nothing is saved")
-            saved = self.add_recipe(sid, title=draft["title"], origin="generated")
-            self.assertEqual(saved["origin"], "generated")
-
-            for bad in ({}, {"ingredients": []}, {"ingredients": [" "]}, {"ingredients": "rice"},
-                        {"ingredients": ["x"] * 16}):
-                with self.subTest(bad=bad):
-                    self.assertEqual(self.request("POST", "/api/recipes/generate", bad, sid=sid)[0], 400)
-            with mock.patch.dict(server.RECIPE_LIMITS, {"generate": (1, 500)}):
-                self.assertEqual(self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)[0], 429)
-
-        with mock.patch.dict(os.environ, {"RECIPEGEN_URL": ""}):
-            self.assertFalse(self.request("GET", "/api/recipes", sid=sid)[1]["canGenerate"])
-            self.assertEqual(self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)[0], 503)
-
-    def test_generator_errors(self):
-        sid, _ = self.sign_in("busy-sub")
-        with mock.patch.dict(os.environ, {"RECIPEGEN_URL": f"http://127.0.0.1:{self.port}/nothing-here"}):
-            status, body, _ = self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)
-            self.assertEqual(status, 502, body)
-            self.assertIn("isn't answering", body["error"])
+        self.assertEqual(self.add_recipe(sid, title="Chicken and rice", origin="generated")["origin"], "generated")
+        self.assertNotIn("canGenerate", self.request("GET", "/api/recipes", sid=sid)[1])
+        self.assertEqual(self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)[0], 404)
 
     def test_importing_a_recipe(self):
         sid, _ = self.sign_in("import-sub")
