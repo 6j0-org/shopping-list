@@ -27,6 +27,7 @@ from pathlib import Path
 
 import idtoken
 import recipes
+from recipes import RecipeError
 import sections
 from feedback import Feedback, FeedbackError
 
@@ -37,10 +38,13 @@ SESSION_DAYS = 30
 SESSION_MS = SESSION_DAYS * 86400 * 1000
 INVITE_DAYS = 7
 INVITE_MS = INVITE_DAYS * 86400 * 1000
+DAY_MS = 86400 * 1000
+# Daily limits on recipe imports (each a paid Claude API call) and generations (each ties up the recipe generator for
+# a while), per account and for everyone together: kind -> (per account, everyone).
+RECIPE_LIMITS = {"import": (20, 200), "generate": (30, 500)}
 
 _db_lock = threading.Lock()
 _db = None
-_catalog = None
 _feedback = None
 
 # Sign-in (see main()): people sign in with an identity from a 6j0.org identity server. Each identity gets its own
@@ -114,6 +118,25 @@ def init_db(path):
             list_id   INTEGER NOT NULL,
             created   INTEGER NOT NULL
         );
+        -- The recipe book, one for everyone. Each recipe is JSON {title, servings, source, origin, ingredients,
+        -- steps} (see clean_recipe). author is the user who added it, who (with the admin) may change it; NULL once
+        -- their account is erased.
+        CREATE TABLE IF NOT EXISTS recipe_book (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            author  INTEGER,
+            data    TEXT NOT NULL,
+            created INTEGER NOT NULL,
+            updated INTEGER NOT NULL
+        );
+        -- When each account imported or generated recipes ("import", "generate"), for the daily limits.
+        CREATE TABLE IF NOT EXISTS recipe_uses (
+            user_id INTEGER NOT NULL,
+            kind    TEXT NOT NULL,
+            at      INTEGER NOT NULL
+        );
+        -- The cache of the TheMealDB catalog the app used before the recipe book.
+        DROP TABLE IF EXISTS recipes;
+        DROP TABLE IF EXISTS meta;
         """
     )
     # Databases from before there was more than one list: their items and users have no list_id yet.
@@ -240,13 +263,16 @@ def end_session(token):
 
 
 def erase_account(sub):
-    """The identity was deleted: erase its account, sessions, and feedback, and its list if nobody else is on it."""
+    """The identity was deleted: erase its account, sessions, and feedback, and its list if nobody else is on it.
+    Recipes it added stay in the recipe book, without an author."""
     with _db_lock:
         row = _db.execute("SELECT id, guid, list_id FROM users WHERE sub = ?", (sub,)).fetchone()
         if not row:
             return
         _db.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
         _db.execute("DELETE FROM api_tokens WHERE user_id = ?", (row["id"],))
+        _db.execute("DELETE FROM recipe_uses WHERE user_id = ?", (row["id"],))
+        _db.execute("UPDATE recipe_book SET author = NULL WHERE author = ?", (row["id"],))
         _db.execute("DELETE FROM users WHERE id = ?", (row["id"],))
         if row["list_id"] is not None and _member_count(row["list_id"]) == 0:
             _drop_list(row["list_id"])
@@ -351,26 +377,33 @@ def _fold(name):
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
-def canonical_name(name):
-    """Dictation says "peanut butter." for "Peanut Butter": drop the trailing period, and use TheMealDB's spelling
-    when the name is one of its ingredients, ignoring case and punctuation (as the app's add form does). Otherwise
-    the name as given."""
+def known_names(list_id):
+    """The names a list already uses, for suggesting and spelling item names: the recipe book's ingredients and the
+    items on its list and in its pantry. Sorted, without case-only duplicates (a recipe's spelling wins)."""
+    with _db_lock:
+        books = [r[0] for r in _db.execute("SELECT data FROM recipe_book")]
+        items = [r[0] for r in _db.execute("SELECT name FROM items WHERE list_id = ?", (list_id,))]
+    names = [i["name"] for data in books for i in json.loads(data)["ingredients"]] + items
+    unique = {}
+    for n in names:
+        unique.setdefault(n.lower(), n)
+    return sorted(unique.values(), key=str.lower)
+
+
+def canonical_name(list_id, name):
+    """Dictation says "peanut butter." for "Peanut Butter": drop the trailing period, and use the spelling the list
+    already uses (known_names), ignoring case and punctuation. Otherwise the name as given."""
     name = name.strip().rstrip(".").strip()
     folded = _fold(name)
-    try:
-        ingredients = _catalog.ingredients() if _catalog else []
-    except Exception:  # the ingredient list is a nice-to-have
-        traceback.print_exc()
-        ingredients = []
-    return next((n for n in ingredients if _fold(n) == folded), name)
+    return next((n for n in known_names(list_id) if _fold(n) == folded), name)
 
 
 def shortcut_add(user, data):
     """Add an item from a shortcut. The reply's "message" is meant to be spoken back."""
-    name = canonical_name(_clean_text(data, "name", required=True))
+    name = canonical_name(user["list_id"], _clean_text(data, "name", required=True))
     if not name:
         raise BadRequest("name is required")
-    item = create_item(user["list_id"], {"name": name, "quantity": _clean_text(data, "quantity")})
+    item, _ = create_item(user["list_id"], {"name": name, "quantity": _clean_text(data, "quantity")})
     return {"item": item, "message": f"Added {item['name']} to the shopping list."}
 
 
@@ -459,6 +492,7 @@ def list_items(list_id):
         key=lambda i: (
             sections.SECTION_ORDER.get(i["section"], len(sections.SECTION_ORDER)),
             i["checked"],
+            -i["id"] if i["section"] == sections.PANTRY else 0,  # pantry: newest first, to spot a bad scan
             i["name"].lower(),
         )
     )
@@ -504,19 +538,45 @@ def _clean_text(data, key, required=False, limit=200):
     return value
 
 
+COUNT_OF = re.compile(r"^(\d+)(?:\s*[×x]\s*(.+))?$")
+
+
+def _one_more(quantity):
+    """The quantity after one more of the same thing: "" → "2", "3" → "4", "400 g" → "2 × 400 g",
+    "2 × 400 g" → "3 × 400 g". Quantity is free text, so anything else gets "2 × " in front."""
+    m = COUNT_OF.match(quantity)
+    if not m:
+        return f"2 × {quantity}" if quantity else "2"
+    count, rest = int(m.group(1)) + 1, m.group(2)
+    return f"{count} × {rest}" if rest else str(count)
+
+
 def create_item(list_id, data):
+    """Returns (item, created). A barcode already in the pantry isn't added again: its quantity goes up by one."""
     name = _clean_text(data, "name", required=True)
     quantity = _clean_text(data, "quantity")
     barcode = _clean_text(data, "barcode", limit=64) or None
     section, auto = _clean_section(data.get("section"), name)
     with _db_lock:
-        cur = _db.execute(
-            "INSERT INTO items (name, quantity, section, section_auto, barcode, list_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, quantity, section, int(auto), barcode, list_id),
-        )
+        row = None
+        if barcode and section == sections.PANTRY:
+            row = _db.execute(
+                "SELECT id, quantity FROM items WHERE list_id = ? AND section = ? AND barcode = ? ORDER BY id LIMIT 1",
+                (list_id, section, barcode),
+            ).fetchone()
+        if row:
+            item_id = row["id"]
+            _db.execute(
+                "UPDATE items SET quantity = ?, updated_at = datetime('now') WHERE id = ?",
+                (_one_more(row["quantity"]), item_id),
+            )
+        else:
+            item_id = _db.execute(
+                "INSERT INTO items (name, quantity, section, section_auto, barcode, list_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, quantity, section, int(auto), barcode, list_id),
+            ).lastrowid
         _db.commit()
-        item_id = cur.lastrowid
-    return get_item(list_id, item_id)
+    return get_item(list_id, item_id), not row
 
 
 def update_item(list_id, item_id, data):
@@ -638,29 +698,192 @@ def lookup_barcode(code):
 
 
 # --- Recipes --------------------------------------------------------------
+# One recipe book for everyone. A recipe is written by hand, read from a link or pasted text by Claude
+# (recipes.import_recipe), or picked from the generator's suggestions (recipes.generate) and saved. Everyone can see
+# every recipe; only the person who added it, and the admin, can change or delete it. Which ingredients you have
+# comes from your own list's pantry.
+
+ORIGINS = ("hand", "link", "generated")
 
 
-def recipe_matches(list_id, max_missing):
-    _catalog.ensure_fresh(background=True)
-    all_recipes = _catalog.recipes()
+def _clean_list(data, key, limit):
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        raise BadRequest(f"{key} must be a list")
+    if len(value) > limit:
+        raise BadRequest(f"too many {key} (max {limit})")
+    return value
+
+
+def clean_recipe(data):
+    """{title, servings, source, origin, ingredients: [{quantity, name, note}], steps: [str]}, checked. Blank
+    ingredients and steps are dropped."""
+    ingredients = []
+    for i in _clean_list(data, "ingredients", 100):
+        if not isinstance(i, dict):
+            raise BadRequest("each ingredient must be an object")
+        ing = {"quantity": _clean_text(i, "quantity", limit=100), "name": _clean_text(i, "name"),
+               "note": _clean_text(i, "note")}
+        if ing["name"]:
+            ingredients.append(ing)
+        elif ing["quantity"] or ing["note"]:
+            raise BadRequest("each ingredient needs a name")
+    steps = []
+    for step in _clean_list(data, "steps", 100):
+        step = _clean_text({"step": step}, "step", limit=2000)
+        if step:
+            steps.append(step)
+    source = _clean_text(data, "source", limit=2000)
+    if source:
+        try:
+            source = recipes.clean_url(source)
+        except RecipeError:
+            raise BadRequest("source must be a web link (https://…)")
+    origin = data.get("origin") or "hand"
+    if origin not in ORIGINS:
+        raise BadRequest(f"origin must be one of {', '.join(ORIGINS)}")
+    return {
+        "title": _clean_text(data, "title", required=True),
+        "servings": _clean_text(data, "servings", limit=100),
+        "source": source,
+        "origin": origin,
+        "ingredients": ingredients,
+        "steps": steps,
+    }
+
+
+def _may_change(user, author):
+    return author == user["id"] or feedback_who(user)["admin"]
+
+
+def _recipe_out(user, row):
+    """A stored recipe as the API shows it. The author's account isn't shown, only whether this user may change it."""
+    return {**json.loads(row["data"]), "id": row["id"], "mine": row["author"] == user["id"],
+            "canEdit": _may_change(user, row["author"])}
+
+
+def list_recipes(user):
+    with _db_lock:
+        rows = _db.execute("SELECT id, author, data FROM recipe_book").fetchall()
+    return [_recipe_out(user, r) for r in rows]
+
+
+def get_recipe(user, recipe_id):
+    with _db_lock:
+        row = _db.execute("SELECT id, author, data FROM recipe_book WHERE id = ?", (recipe_id,)).fetchone()
+    return _recipe_out(user, row) if row else None
+
+
+def create_recipe(user, data):
+    recipe = clean_recipe(data)
+    now = _now_ms()
+    with _db_lock:
+        recipe_id = _db.execute(
+            "INSERT INTO recipe_book (author, data, created, updated) VALUES (?, ?, ?, ?)",
+            (user["id"], json.dumps(recipe), now, now),
+        ).lastrowid
+        _db.commit()
+    return {**recipe, "id": recipe_id, "mine": True, "canEdit": True}
+
+
+def _author_check(user, recipe_id):
+    """Raise unless the recipe exists and the user may change it. The caller holds _db_lock."""
+    row = _db.execute("SELECT author FROM recipe_book WHERE id = ?", (recipe_id,)).fetchone()
+    if not row:
+        raise HttpError(HTTPStatus.NOT_FOUND, "no such recipe")
+    if not _may_change(user, row["author"]):
+        raise HttpError(HTTPStatus.FORBIDDEN, "Only the person who added this recipe can change it.")
+
+
+def update_recipe(user, recipe_id, data):
+    recipe = clean_recipe(data)
+    with _db_lock:
+        _author_check(user, recipe_id)
+        _db.execute("UPDATE recipe_book SET data = ?, updated = ? WHERE id = ?",
+                    (json.dumps(recipe), _now_ms(), recipe_id))
+        _db.commit()
+    return get_recipe(user, recipe_id)
+
+
+def delete_recipe(user, recipe_id):
+    with _db_lock:
+        _author_check(user, recipe_id)
+        _db.execute("DELETE FROM recipe_book WHERE id = ?", (recipe_id,))
+        _db.commit()
+
+
+def _count_use(user, kind):
+    """Note an import or a generation, or refuse it when it's over the daily limits (RECIPE_LIMITS)."""
+    per_account, per_day = RECIPE_LIMITS[kind]
+    verb = "imported" if kind == "import" else "asked for meal ideas"
+    now = _now_ms()
+    with _db_lock:
+        _db.execute("DELETE FROM recipe_uses WHERE at <= ?", (now - DAY_MS,))
+        mine = _db.execute("SELECT COUNT(*) FROM recipe_uses WHERE user_id = ? AND kind = ?",
+                           (user["id"], kind)).fetchone()[0]
+        everyone = _db.execute("SELECT COUNT(*) FROM recipe_uses WHERE kind = ?", (kind,)).fetchone()[0]
+        if mine >= per_account:
+            raise HttpError(HTTPStatus.TOO_MANY_REQUESTS,
+                            f"You've {verb} {per_account} times today. Try again tomorrow, or write a recipe in by hand.")
+        if everyone >= per_day:
+            raise HttpError(HTTPStatus.TOO_MANY_REQUESTS,
+                            "The app has done all it can of that today. Try again tomorrow, or write a recipe in by hand.")
+        _db.execute("INSERT INTO recipe_uses (user_id, kind, at) VALUES (?, ?, ?)", (user["id"], kind, now))
+        _db.commit()
+
+
+def import_recipe(user, data):
+    """Read a recipe from {url} or {text} with Claude and add it to the recipe book."""
+    if not recipes.can_import():
+        raise HttpError(HTTPStatus.SERVICE_UNAVAILABLE, "Importing recipes isn't set up on this server.")
+    url = _clean_text(data, "url", limit=2000)
+    text = _clean_text(data, "text", limit=recipes.MAX_TEXT_CHARS)
+    if not url and not text:
+        raise BadRequest("Paste a link to a recipe, or the recipe's text.")
+    if url:
+        recipes.clean_url(url)  # a bad link doesn't count against the limit
+    _count_use(user, "import")
+    return create_recipe(user, recipes.import_recipe(url=url, text=text))
+
+
+def generate_recipes(user, data):
+    """Meal ideas from {ingredients: [name]}: a few recipe drafts, not stored. Saving one is a POST /api/recipes."""
+    if not recipes.can_generate():
+        raise HttpError(HTTPStatus.SERVICE_UNAVAILABLE, "Meal ideas aren't set up on this server.")
+    names = []
+    for name in _clean_list(data, "ingredients", recipes.MAX_GENERATE_INGREDIENTS):
+        name = _clean_text({"name": name}, "name", limit=100)
+        if name and name.lower() not in (n.lower() for n in names):
+            names.append(name)
+    if not names:
+        raise BadRequest("Pick at least one ingredient.")
+    _count_use(user, "generate")
+    return {"recipes": recipes.generate(names)}
+
+
+def recipe_book(user, max_missing):
+    book = list_recipes(user)
     with _db_lock:
         names = [r[0] for r in _db.execute(
-            "SELECT name FROM items WHERE list_id = ? AND section = ?", (list_id, sections.PANTRY)
+            "SELECT name FROM items WHERE list_id = ? AND section = ?", (user["list_id"], sections.PANTRY)
         )]
     return {
-        "recipes": recipes.match(all_recipes, names, max_missing=max_missing),
-        "catalog_size": len(all_recipes),
+        "recipes": recipes.match(book, names, max_missing=max_missing),
+        "count": len(book),
         "pantry_size": len(names),
         "staples": sorted(recipes.STAPLES),
-        "error": _catalog.error,
+        "canImport": recipes.can_import(),
+        "canGenerate": recipes.can_generate(),
     }
 
 
 # --- HTTP -----------------------------------------------------------------
 
+RECIPE_BYTES = 400_000  # a recipe, or a recipe's pasted text
 ITEM_PATH = re.compile(r"^/api/items/(\d+)$")
 BARCODE_PATH = re.compile(r"^/api/barcode/(\d{6,14})$")
 MEMBER_PATH = re.compile(r"^/api/list/members/([0-9a-f]{32})$")
+RECIPE_PATH = re.compile(r"^/api/recipes/(\d+)$")
 FEEDBACK_PATH = re.compile(r"^/api/feedback/([A-Za-z0-9_-]{1,32})$")
 FEEDBACK_REPLY_PATH = re.compile(r"^/api/feedback/([A-Za-z0-9_-]{1,32})/replies/([A-Za-z0-9_-]{1,32})$")
 FEEDBACK_ACTION_PATH = re.compile(r"^/api/feedback/([A-Za-z0-9_-]{1,32})/(replies|status)$")
@@ -694,9 +917,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.end_headers()
 
-    def _read_json(self):
+    def _read_json(self, limit=16_000):
         length = int(self.headers.get("Content-Length") or 0)
-        if length > 16_000:
+        if length > limit:
             raise BadRequest("request too large")
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
@@ -736,6 +959,8 @@ class Handler(SimpleHTTPRequestHandler):
         except HttpError as e:
             self._send_json(e.status, {"error": e.message})
         except FeedbackError as e:
+            self._send_json(e.status, {"error": e.message})
+        except RecipeError as e:
             self._send_json(e.status, {"error": e.message})
         except Exception:
             traceback.print_exc()
@@ -842,12 +1067,25 @@ class Handler(SimpleHTTPRequestHandler):
         # ---- the user's list ----
         list_id = user["list_id"]
         if method == "GET":
-            return self._route_list_get(list_id, path)
+            return self._route_list_get(user, path)
         if method == "POST":
             if path == "/api/items":
-                return self._send_json(HTTPStatus.CREATED, create_item(list_id, self._read_json()))
+                item, created = create_item(list_id, self._read_json())
+                return self._send_json(HTTPStatus.CREATED if created else HTTPStatus.OK, item)
             if path == "/api/items/clear-checked":
                 return self._send_json(HTTPStatus.OK, {"deleted": clear_checked(list_id)})
+            if path == "/api/recipes":
+                return self._send_json(HTTPStatus.CREATED, create_recipe(user, self._read_json(RECIPE_BYTES)))
+            if path == "/api/recipes/import":
+                return self._send_json(HTTPStatus.CREATED, import_recipe(user, self._read_json(RECIPE_BYTES)))
+            if path == "/api/recipes/generate":
+                return self._send_json(HTTPStatus.OK, generate_recipes(user, self._read_json()))
+        m = RECIPE_PATH.match(path)
+        if m and method == "PUT":
+            return self._send_json(HTTPStatus.OK, update_recipe(user, int(m.group(1)), self._read_json(RECIPE_BYTES)))
+        if m and method == "DELETE":
+            delete_recipe(user, int(m.group(1)))
+            return self._send_empty()
         m = ITEM_PATH.match(path)
         if m and method == "PUT":
             item = update_item(list_id, int(m.group(1)), self._read_json())
@@ -877,19 +1115,25 @@ class Handler(SimpleHTTPRequestHandler):
         except HttpError as e:
             return self._send_json(e.status, {"error": e.message, "message": e.message})
 
-    def _route_list_get(self, list_id, path):
+    def _route_list_get(self, user, path):
+        list_id = user["list_id"]
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if path == "/api/items":
             return self._send_json(HTTPStatus.OK, list_items(list_id))
         if path == "/api/sections":
             return self._send_json(HTTPStatus.OK, {"sections": sections.SECTIONS, "pantry": sections.PANTRY})
         if path == "/api/ingredients":
-            _catalog.ensure_fresh(background=True)
-            return self._send_json(HTTPStatus.OK, {"ingredients": _catalog.ingredients()})
+            return self._send_json(HTTPStatus.OK, {"ingredients": known_names(list_id)})
         if path == "/api/recipes":
             raw = query.get("max_missing", [""])[0]
             max_missing = int(raw) if raw.isdigit() else None
-            return self._send_json(HTTPStatus.OK, recipe_matches(list_id, max_missing))
+            return self._send_json(HTTPStatus.OK, recipe_book(user, max_missing))
+        m = RECIPE_PATH.match(path)
+        if m:
+            recipe = get_recipe(user, int(m.group(1)))
+            if not recipe:
+                raise HttpError(HTTPStatus.NOT_FOUND, "no such recipe")
+            return self._send_json(HTTPStatus.OK, recipe)
         if path.startswith("/api/classify"):
             return self._send_json(HTTPStatus.OK, {"section": sections.classify(query.get("name", [""])[0])})
         m = BARCODE_PATH.match(path)
@@ -957,14 +1201,12 @@ def main():
         admin_sub=args.admin_sub.strip(),
         secure_cookie="; Secure" if args.origin.startswith("https:") else "",
     )
-    global _catalog, _feedback
+    global _feedback
     init_db(args.db)
     note = claim_unowned(_split_subs(args.allowed_subs))
     if note:
         print(note)
     _feedback = Feedback(args.feedback or str(Path(args.db).resolve().parent / "feedback.jsonl"))
-    _catalog = recipes.Catalog(_db, _db_lock, USER_AGENT)
-    _catalog.ensure_fresh(background=True)  # download recipes without delaying startup
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     scheme = "http"
     if args.cert:
@@ -972,6 +1214,10 @@ def main():
         ctx.load_cert_chain(args.cert, args.key)
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         scheme = "https"
+    if not recipes.can_import():
+        print("ANTHROPIC_API_KEY isn't set, so recipes can't be imported from links.")
+    if not recipes.can_generate():
+        print("RECIPEGEN_URL isn't set, so the app can't suggest meals.")
     print(f"Shopping list running at {scheme}://{args.host}:{args.port}/  (sign-in: {origin} as \"{args.id_app}\")")
     try:
         httpd.serve_forever()

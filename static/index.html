@@ -79,16 +79,47 @@
       <p id="pantry-empty" class="empty" hidden>Your pantry is empty. Scan what you have.</p>
     </section>
 
-    <!-- Recipes -->
+    <!-- Recipes: the recipe book everyone shares (see static/app.js) -->
     <section id="view-recipes" class="view" hidden>
+      <div class="card add-recipe">
+        <b>Add a recipe</b>
+        <form id="import-form" class="import" autocomplete="off" hidden>
+          <label for="import-input" class="muted small">From a link, or the recipe's text</label>
+          <textarea id="import-input" name="source" rows="2" required
+            placeholder="Paste a link to a recipe, or the recipe's text"></textarea>
+          <p class="muted small">Claude (from Anthropic) reads the page and writes it up as ingredients and numbered steps. Photos aren't kept, and the link to the original is.</p>
+          <div class="row-actions">
+            <button type="submit" class="primary">Import recipe</button>
+          </div>
+        </form>
+        <div class="row-actions start">
+          <button type="button" id="write-recipe">Write one yourself</button>
+          <button type="button" id="suggest-meals" hidden>Suggest meals</button>
+        </div>
+        <p class="muted small">Recipes are shared with everyone who uses the app. Only you can change the ones you add.</p>
+      </div>
+      <form id="suggest" class="card meal-ideas" autocomplete="off" hidden>
+        <b>Suggest meals</b>
+        <p class="muted small">Pick what to cook with. A small recipe model writes a few ideas; they're often odd, so check one over before you save it.</p>
+        <div id="suggest-picks" class="chips" role="group" aria-label="Ingredients to use"></div>
+        <label class="muted small">Anything else (separate with commas)
+          <input name="extra" maxlength="500" placeholder="chicken, rice">
+        </label>
+        <div class="row-actions">
+          <button type="button" class="ghost" id="suggest-close">Close</button>
+          <button type="submit" class="primary">Suggest meals</button>
+        </div>
+        <div id="suggestions"></div>
+      </form>
+      <div id="recipe-new"></div>
       <div class="recipe-filter" role="group" aria-label="Missing ingredients allowed">
         <span>Missing at most</span>
         <div class="segmented">
           <button data-missing="0">0</button>
-          <button data-missing="1" aria-pressed="true">1</button>
+          <button data-missing="1">1</button>
           <button data-missing="2">2</button>
           <button data-missing="3">3</button>
-          <button data-missing="">Any</button>
+          <button data-missing="" aria-pressed="true">Any</button>
         </div>
       </div>
       <p id="recipes-note" class="muted small"></p>
@@ -130,7 +161,6 @@
     <p>Powered by open services:</p>
     <ul>
       <li><a href="https://world.openfoodfacts.org/" target="_blank" rel="noopener">Open Food Facts</a>: product barcodes (data under the <a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">ODbL</a>)</li>
-      <li><a href="https://www.themealdb.com/" target="_blank" rel="noopener">TheMealDB</a>: recipes and ingredient names</li>
       <li><a href="https://gitlab.com/6j0-org/id" target="_blank" rel="noopener">6j0.org ID</a>: sign-in</li>
       <li><a href="https://github.com/zxing-js/browser" target="_blank" rel="noopener">ZXing</a>, served by <a href="https://www.jsdelivr.com/" target="_blank" rel="noopener">jsDelivr</a>: barcode scanning in browsers without a built-in scanner</li>
     </ul>
@@ -143,6 +173,7 @@
       <div class="reticle"></div>
     </div>
     <p id="scan-status" class="scan-status">Point the camera at a barcode</p>
+    <div id="scan-card" class="scan-card" aria-live="polite" hidden></div>
     <div class="row-actions">
       <button id="scan-cancel" class="ghost">Close</button>
     </div>
@@ -166,7 +197,7 @@
   <!-- Share the list -->
   <dialog id="share" class="sheet">
     <h2>Share this list</h2>
-    <p class="muted">Everyone on it sees and changes the same list, pantry, and recipes.</p>
+    <p class="muted">Everyone on it sees and changes the same list and pantry.</p>
     <ul id="members" class="members"></ul>
     <div class="row-actions start">
       <button id="invite-btn" class="primary">Make an invite link</button>

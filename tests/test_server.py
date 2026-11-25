@@ -9,8 +9,8 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
+from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -41,17 +41,6 @@ class ServerTest(unittest.TestCase):
         server.init_db(os.path.join(cls.tmp.name, "shopping.db"))
         cls.feedback_file = Path(cls.tmp.name, "feedback.jsonl")
         server._feedback = Feedback(cls.feedback_file)
-        # A recipe catalog that's already fresh, so nothing is downloaded.
-        with server._db_lock:
-            server._db.executescript("""
-                CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """)
-            server._db.execute("INSERT OR REPLACE INTO meta VALUES ('recipes_fetched_at', ?)", (str(time.time()),))
-            server._db.execute("INSERT OR REPLACE INTO meta VALUES ('ingredients', ?)",
-                               (json.dumps(["Peanut Butter", "basmati rice", "Basmati Rice", "Butter"]),))
-            server._db.commit()
-        server._catalog = recipes.Catalog(server._db, server._db_lock, "test")
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         cls.port = cls.httpd.server_address[1]
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -66,6 +55,10 @@ class ServerTest(unittest.TestCase):
     def setUp(self):
         idtoken._keys = {}
         idtoken._fetched_at = 0.0
+        with server._db_lock:  # the recipe book is shared by everyone, so each test starts with an empty one
+            server._db.execute("DELETE FROM recipe_book")
+            server._db.execute("DELETE FROM recipe_uses")
+            server._db.commit()
 
     def request(self, method, path, body=None, sid=None, headers=None, raw=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -120,6 +113,29 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 201, item)
         return item
 
+    def test_scanning_a_barcode_again_raises_its_quantity(self):
+        sid, _ = self.sign_in("scan-sub")
+        scan = {"barcode": "0123456789012", "section": "Pantry"}
+        first = self.add(sid, "Beans", quantity="400 g", **scan)
+        for want in ("2 × 400 g", "3 × 400 g"):
+            status, item, _ = self.request("POST", "/api/items", {"name": "Beans", "quantity": "400 g", **scan}, sid=sid)
+            self.assertEqual((status, item["id"], item["quantity"]), (200, first["id"], want))
+        self.assertEqual(self.names(sid, pantry=True), ["Beans"])
+        self.add(sid, "Beans", **scan | {"section": "auto"})  # the shopping list isn't merged
+        self.add(sid, "Rice", barcode="999999", section="Pantry")
+        status, rice, _ = self.request("POST", "/api/items", {"name": "Rice", "barcode": "999999", "section": "Pantry"}, sid=sid)
+        self.assertEqual((status, rice["quantity"]), (200, "2"))
+
+    def test_pantry_lists_newest_first(self):
+        sid, _ = self.sign_in("newest-sub")
+        for name in ("Apples", "Zucchini", "Milk"):
+            self.add(sid, name, section="Pantry")
+        self.add(sid, "Bread")
+        status, items, _ = self.request("GET", "/api/items", sid=sid)
+        self.assertEqual(status, 200)
+        pantry = [i["name"] for i in items if i["section"] == "Pantry"]
+        self.assertEqual(pantry, ["Milk", "Zucchini", "Apples"])
+
     def invite(self, sid):
         status, body, _ = self.request("POST", "/api/list/invites", {}, sid=sid)
         self.assertEqual((status, body["days"]), (201, 7))
@@ -149,12 +165,186 @@ class ServerTest(unittest.TestCase):
         alice_again, _ = self.sign_in("alice-sub")
         self.assertEqual(self.names(alice_again), ["Bananas"], "signing in again keeps your list")
 
-    def test_ingredient_list(self):
+    def add_recipe(self, sid, title="Toast", ingredients=("Bread", "Butter"), **extra):
+        body = {"title": title, "ingredients": [{"quantity": "1", "name": n, "note": ""} for n in ingredients],
+                "steps": ["Toast it."], **extra}
+        status, recipe, _ = self.request("POST", "/api/recipes", body, sid=sid)
+        self.assertEqual(status, 201, recipe)
+        return recipe
+
+    def test_ingredient_list_is_the_recipe_books_and_the_lists_names(self):
         sid, _ = self.sign_in("cook-sub")
+        self.assertEqual(self.request("GET", "/api/ingredients", sid=sid)[1], {"ingredients": []})
+        self.add_recipe(sid, ingredients=["Peanut Butter", "basmati rice"])
+        self.add(sid, "Basmati Rice")
+        self.add(sid, "Butter", section="Pantry")
         status, body, _ = self.request("GET", "/api/ingredients", sid=sid)
         self.assertEqual(status, 200)
-        self.assertEqual(body["ingredients"], ["basmati rice", "Butter", "Peanut Butter"], "sorted, one per name")
+        self.assertEqual(body["ingredients"], ["basmati rice", "Butter", "Peanut Butter"],
+                         "sorted, one per name, a recipe's spelling first")
+        other, _ = self.sign_in("other-cook-sub")
+        self.assertEqual(self.request("GET", "/api/ingredients", sid=other)[1],
+                         {"ingredients": ["basmati rice", "Peanut Butter"]}, "the recipe book's names, not the other list's items")
         self.assertEqual(self.request("GET", "/api/ingredients")[0], 401)
+
+    def test_recipe_book(self):
+        sid, _ = self.sign_in("book-sub")
+        empty = self.request("GET", "/api/recipes", sid=sid)[1]
+        self.assertEqual((empty["recipes"], empty["count"]), ([], 0))
+        toast = self.add_recipe(sid, source="https://example.com/toast")
+        self.add_recipe(sid, title="Garlic rice", ingredients=["Garlic", "Rice", "garlic cloves", "Salt"])
+        self.add(sid, "Sourdough Bread", section="Pantry")
+        self.add(sid, "Kirkland Jasmine Rice", section="Pantry")
+
+        book = self.request("GET", "/api/recipes", sid=sid)[1]
+        self.assertEqual([(r["title"], r["have"], r["missing"]) for r in book["recipes"]],
+                         [("Garlic rice", 1, 1), ("Toast", 1, 1)], "garlic counts once and salt is a staple")
+        rice = book["recipes"][0]
+        self.assertEqual([(i["name"], i["have"], i["staple"]) for i in rice["ingredients"]],
+                         [("Garlic", False, False), ("Rice", True, False), ("garlic cloves", False, False),
+                          ("Salt", False, True)])
+        self.assertEqual(rice["ingredients"][1]["pantry_item"], "Kirkland Jasmine Rice")
+        self.assertEqual(len(self.request("GET", "/api/recipes?max_missing=0", sid=sid)[1]["recipes"]), 0)
+
+        # Editing, and what's refused
+        status, changed, _ = self.request("PUT", f"/api/recipes/{toast['id']}",
+                                          {**toast, "title": "Buttered toast", "steps": ["Toast.", " ", "Butter."]}, sid=sid)
+        self.assertEqual((status, changed["title"], changed["steps"]), (200, "Buttered toast", ["Toast.", "Butter."]))
+        self.assertEqual(self.request("GET", f"/api/recipes/{toast['id']}", sid=sid)[1]["title"], "Buttered toast")
+        for bad in ({"title": ""}, {"source": "javascript:alert(1)"}, {"ingredients": "eggs"},
+                    {"ingredients": [{"quantity": "2", "name": ""}]}, {"steps": [3]}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.request("POST", "/api/recipes", {**toast, **bad}, sid=sid)[0], 400)
+
+        self.assertEqual((changed["origin"], changed["mine"], changed["canEdit"]), ("hand", True, True))
+        self.assertEqual(self.request("POST", "/api/recipes", {**toast, "origin": "magic"}, sid=sid)[0], 400)
+
+        # Everyone sees it, checked against their own pantry, but only its author (and the admin) can change it
+        other, _ = self.sign_in("not-book-sub")
+        theirs = self.request("GET", "/api/recipes", sid=other)[1]
+        self.assertEqual((theirs["count"], theirs["pantry_size"]), (2, 0))
+        seen = self.request("GET", f"/api/recipes/{toast['id']}", sid=other)[1]
+        self.assertEqual((seen["title"], seen["mine"], seen["canEdit"]), ("Buttered toast", False, False))
+        self.assertNotIn("author", seen)
+        for method, body in [("PUT", toast), ("DELETE", None)]:
+            with self.subTest(method=method):
+                self.assertEqual(self.request(method, f"/api/recipes/{toast['id']}", body, sid=other)[0], 403)
+        self.assertEqual(self.request("DELETE", "/api/recipes/999999", sid=other)[0], 404)
+        admin, _ = self.sign_in("owner-sub")
+        self.assertTrue(self.request("GET", f"/api/recipes/{toast['id']}", sid=admin)[1]["canEdit"])
+        self.assertEqual(self.request("PUT", f"/api/recipes/{toast['id']}", {**toast, "title": "Toast"}, sid=admin)[0], 200)
+
+        self.assertEqual(self.request("DELETE", f"/api/recipes/{toast['id']}", sid=sid)[0], 204)
+        self.assertEqual(self.request("GET", "/api/recipes", sid=other)[1]["count"], 1)
+
+        # Leaving a list, or the list going away, doesn't take recipes with it
+        self.request("POST", "/api/list/join", {"code": self.invite(other)}, sid=sid)
+        self.assertEqual(self.request("GET", "/api/recipes", sid=other)[1]["count"], 1)
+
+    def test_recipes_outlive_their_author(self):
+        sid, _ = self.sign_in("author-sub")
+        recipe = self.add_recipe(sid, title="Soup")
+        self.request("POST", "/api/id/deleted", {"token": self.id.deletion_token("author-sub", APP)})
+        other, _ = self.sign_in("reader-sub")
+        kept = self.request("GET", f"/api/recipes/{recipe['id']}", sid=other)[1]
+        self.assertEqual((kept["title"], kept["canEdit"]), ("Soup", False))
+        with server._db_lock:
+            author = server._db.execute("SELECT author FROM recipe_book WHERE id = ?", (recipe["id"],)).fetchone()[0]
+        self.assertIsNone(author)
+
+    def test_suggesting_meals(self):
+        sid, _ = self.sign_in("meals-sub")
+        raw = [{"title": "chicken and rice", "ingredients": ["1 lb. chicken breast, cubed", "2 c. rice",
+                                                            "2 c. rice", "salt to taste"],
+                "directions": ["brown the chicken.", "add rice and water.", "brown the chicken."]},
+               {"title": "", "ingredients": [], "directions": []}]
+        asked = []
+        with mock.patch.dict(os.environ, {"RECIPEGEN_URL": "http://recipegen:8001"}), \
+                mock.patch.object(recipes, "ask_generator", side_effect=lambda names, count: asked.append(names) or raw):
+            self.assertTrue(self.request("GET", "/api/recipes", sid=sid)[1]["canGenerate"])
+            status, body, _ = self.request("POST", "/api/recipes/generate",
+                                           {"ingredients": ["Chicken", " rice ", "chicken", ""]}, sid=sid)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(asked, [["Chicken", "rice"]])
+            self.assertEqual(len(body["recipes"]), 1, "an empty recipe is dropped")
+            draft = body["recipes"][0]
+            self.assertEqual((draft["title"], draft["origin"], draft["source"]), ("Chicken and rice", "generated", ""))
+            self.assertEqual(draft["ingredients"], [
+                {"quantity": "1 lb.", "name": "chicken breast", "note": "cubed"},
+                {"quantity": "2 c.", "name": "rice", "note": ""},
+                {"quantity": "", "name": "salt", "note": "to taste"},
+            ])
+            self.assertEqual(draft["steps"], ["Brown the chicken.", "Add rice and water."])
+            self.assertEqual(self.request("GET", "/api/recipes", sid=sid)[1]["count"], 0, "nothing is saved")
+            saved = self.add_recipe(sid, title=draft["title"], origin="generated")
+            self.assertEqual(saved["origin"], "generated")
+
+            for bad in ({}, {"ingredients": []}, {"ingredients": [" "]}, {"ingredients": "rice"},
+                        {"ingredients": ["x"] * 16}):
+                with self.subTest(bad=bad):
+                    self.assertEqual(self.request("POST", "/api/recipes/generate", bad, sid=sid)[0], 400)
+            with mock.patch.dict(server.RECIPE_LIMITS, {"generate": (1, 500)}):
+                self.assertEqual(self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)[0], 429)
+
+        with mock.patch.dict(os.environ, {"RECIPEGEN_URL": ""}):
+            self.assertFalse(self.request("GET", "/api/recipes", sid=sid)[1]["canGenerate"])
+            self.assertEqual(self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)[0], 503)
+
+    def test_generator_errors(self):
+        sid, _ = self.sign_in("busy-sub")
+        with mock.patch.dict(os.environ, {"RECIPEGEN_URL": f"http://127.0.0.1:{self.port}/nothing-here"}):
+            status, body, _ = self.request("POST", "/api/recipes/generate", {"ingredients": ["rice"]}, sid=sid)
+            self.assertEqual(status, 502, body)
+            self.assertIn("isn't answering", body["error"])
+
+    def test_importing_a_recipe(self):
+        sid, _ = self.sign_in("import-sub")
+        read = {"is_recipe": True, "title": "Pancakes", "servings": "4",
+                "ingredients": [{"quantity": "1 cup", "name": "all-purpose flour", "note": "sifted"},
+                                {"quantity": "", "name": " ", "note": ""}],
+                "steps": ["Mix.", "Cook."]}
+        page = """<html><head><title>Best Pancakes | Site</title><script type="application/ld+json">
+            {"@context": "https://schema.org", "@graph": [{"@type": "WebPage"}, {"@type": ["Recipe"], "name": "Pancakes",
+             "image": "https://example.com/p.jpg", "recipeIngredient": ["1 cup flour, sifted"]}]}</script></head></html>"""
+        sent = []
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}), \
+                mock.patch.object(recipes, "fetch_page", return_value=page) as fetch, \
+                mock.patch.object(recipes, "ask_claude", side_effect=lambda c: sent.append(c) or read):
+            status, recipe, _ = self.request("POST", "/api/recipes/import", {"url": "https://example.com/pancakes"}, sid=sid)
+            self.assertEqual(status, 201, recipe)
+            fetch.assert_called_once_with("https://example.com/pancakes")
+            self.assertEqual((recipe["title"], recipe["source"], recipe["origin"], recipe["steps"]),
+                             ("Pancakes", "https://example.com/pancakes", "link", ["Mix.", "Cook."]))
+            self.assertEqual(recipe["ingredients"], [{"quantity": "1 cup", "name": "all-purpose flour", "note": "sifted"}])
+            self.assertIn("recipeIngredient", sent[0])
+            self.assertNotIn("p.jpg", sent[0], "photos aren't sent")
+
+            status, recipe, _ = self.request("POST", "/api/recipes/import", {"text": "Pancakes: flour, milk."}, sid=sid)
+            self.assertEqual((status, recipe["source"]), (201, ""))
+            self.assertTrue(sent[1].endswith("Pancakes: flour, milk."))
+
+            read["is_recipe"] = False
+            self.assertEqual(self.request("POST", "/api/recipes/import", {"text": "hello"}, sid=sid)[0], 422)
+            for body in ({}, {"url": "file:///etc/passwd"}, {"url": "not a link"}):
+                with self.subTest(body=body):
+                    self.assertEqual(self.request("POST", "/api/recipes/import", body, sid=sid)[0], 400)
+            self.assertEqual(self.request("GET", "/api/recipes", sid=sid)[1]["count"], 2)
+
+            with mock.patch.dict(server.RECIPE_LIMITS, {"import": (3, 200)}):
+                status, body, _ = self.request("POST", "/api/recipes/import", {"text": "x"}, sid=sid)
+                self.assertEqual(status, 429, body)
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            self.assertFalse(self.request("GET", "/api/recipes", sid=sid)[1]["canImport"])
+            self.assertEqual(self.request("POST", "/api/recipes/import", {"text": "x"}, sid=sid)[0], 503)
+
+    def test_import_refuses_private_addresses(self):
+        # This test server is on 127.0.0.1.
+        with self.assertRaises(recipes.RecipeError) as caught:
+            recipes.fetch_page(f"http://127.0.0.1:{self.port}/")
+        self.assertIn("private address", caught.exception.message)
+        with self.assertRaises(recipes.RecipeError):
+            recipes.fetch_page(f"http://localhost:{self.port}/")
 
     def test_sharing_a_list_by_invite(self):
         host, _ = self.sign_in("host-sub")
@@ -346,7 +536,8 @@ class ServerTest(unittest.TestCase):
             stored = [r[0] for r in server._db.execute("SELECT token_hash FROM api_tokens")]
         self.assertNotIn(token, stored, "stored hashed")
 
-        # Adding: dictation's trailing period goes, and an ingredient takes TheMealDB's spelling.
+        # Adding: dictation's trailing period goes, and a name takes the spelling the list already uses.
+        self.add_recipe(sid, ingredients=["Peanut Butter"])
         status, body, _ = self.shortcut(token, {"name": "peanut butter."}, **{"Sec-Fetch-Site": "cross-site"})
         self.assertEqual(status, 201, body)
         self.assertEqual(body["message"], "Added Peanut Butter to the shopping list.")

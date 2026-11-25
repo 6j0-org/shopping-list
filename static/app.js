@@ -5,8 +5,8 @@ import { startHotDogMan } from "./hotdog.js";
 const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js";
 
 const state = {
-  items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "1", view: "list", me: null,
-  ingredients: new Map(), // folded name -> TheMealDB ingredient name, for pantry items typed by hand
+  items: [], sections: [], pantry: "Pantry", editing: null, maxMissing: "", recipeEditing: false, view: "list", me: null,
+  ingredients: new Map(), // folded name -> a name the list already uses (its recipes' ingredients and its items)
   search: { list: "", pantry: "" }, // what's typed in each page's search box
   settings: {}, // which optional controls show; see Settings
 };
@@ -30,6 +30,7 @@ async function api(method, path, body) {
 async function refresh() {
   state.items = await api("GET", "/api/items");
   render();
+  loadIngredients().catch(() => {}); // the names the list uses change as items come and go
 }
 
 function toast(msg) {
@@ -435,24 +436,35 @@ function feedbackElement() {
 }
 
 // ---------- Recipes ----------
+// The recipe book everyone shares. A recipe is written by hand, imported from a link or pasted text (the server has
+// Claude read it), or picked from the meal ideas the recipe generator writes. Only the person who added a recipe (and
+// the admin) can edit or delete it. Each one shows which ingredients your pantry covers.
 async function loadRecipes() {
+  if (state.recipeEditing) return; // don't throw away an open editor
   const note = $("#recipes-note");
   const empty = $("#recipes-empty");
   if (!$("#recipes").childElementCount) note.textContent = "Loading recipes…";
   const data = await api("GET", `/api/recipes?max_missing=${state.maxMissing}`);
+  if (state.recipeEditing) return;
 
-  const open = new Set([...document.querySelectorAll("#recipes details[open]")].map((d) => d.dataset.id));
-  $("#recipes").replaceChildren(...data.recipes.map((r) => renderRecipe(r, open.has(r.id))));
+  $("#import-form").hidden = !data.canImport;
+  $("#suggest-meals").hidden = !data.canGenerate;
+  state.staples = new Set(data.staples.map(fold));
+  const open = new Set([...document.querySelectorAll("#recipes [data-id][open]")].map((d) => d.dataset.id));
+  $("#recipes").replaceChildren(...data.recipes.map((r) => renderRecipe(r, open.has(String(r.id)))));
 
-  note.textContent = data.catalog_size
-    ? `Matching your ${data.pantry_size} pantry items against ${data.catalog_size} recipes from TheMealDB. ` +
+  note.textContent = data.count
+    ? `${data.recipes.length} of ${data.count} recipe${data.count === 1 ? "" : "s"}, checked against your ${data.pantry_size} pantry items. ` +
       `Assumes you always have ${data.staples.filter((s) => !s.includes(" ")).join(", ")}.`
     : "";
   empty.hidden = data.recipes.length > 0;
-  empty.textContent =
-    data.error && !data.catalog_size ? data.error :
-    data.pantry_size === 0 ? "Your pantry is empty. Scan or add what you have and recipes will show up here." :
-    "No recipes match. Try allowing more missing ingredients.";
+  empty.textContent = data.count === 0
+    ? "The recipe book is empty. Add a recipe above."
+    : "No recipes match. Try allowing more missing ingredients.";
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
 }
 
 function renderRecipe(r, isOpen) {
@@ -460,7 +472,7 @@ function renderRecipe(r, isOpen) {
   const score = el("div", { class: "score" },
     el("span", { class: "ok" }, `Have ${r.have}`),
     missing.length
-      ? el("span", { class: "need" }, ` · Need ${missing.map((i) => i.name).join(", ")}`)
+      ? el("span", { class: "need" }, ` · Need ${[...new Set(missing.map((i) => i.name))].join(", ")}`)
       : el("span", { class: "ok" }, " · You have everything"));
 
   const ingredients = el("ul", { class: "ingredients" }, r.ingredients.map((i) => {
@@ -468,50 +480,256 @@ function renderRecipe(r, isOpen) {
     return el("li", { class: kind },
       el("span", { class: "mark", "aria-label": kind }, i.have ? "✓" : i.staple ? "·" : "✗"),
       el("span", {}, i.name,
+        i.note ? el("span", { class: "note" }, `, ${i.note}`) : null,
         i.have && i.pantry_item.toLowerCase() !== i.name.toLowerCase()
           ? el("span", { class: "from" }, `from ${i.pantry_item}`) : null),
-      el("span", { class: "measure" }, i.measure));
+      el("span", { class: "measure" }, i.quantity));
   }));
 
+  // Puts each missing ingredient on the shopping list once, with the recipe's quantity, skipping any already there.
   const addMissing = missing.length ? el("button", {
     class: "primary",
     onclick: (e) => guard(async () => {
       e.target.disabled = true;
-      const onList = new Set(state.items.filter((i) => i.section !== state.pantry).map((i) => i.name.toLowerCase()));
-      const toAdd = missing.filter((i) => !onList.has(i.name.toLowerCase()));
-      for (const i of toAdd) {
-        await api("POST", "/api/items", { name: i.name, quantity: i.measure, section: "auto" });
+      try {
+        const onList = new Set(state.items.filter((i) => i.section !== state.pantry).map((i) => fold(i.name)));
+        const toAdd = missing.filter((i) => {
+          if (onList.has(fold(i.name))) return false;
+          onList.add(fold(i.name));
+          return true;
+        });
+        for (const i of toAdd) {
+          await api("POST", "/api/items", { name: i.name, quantity: i.quantity, section: "auto" });
+        }
+        await refresh();
+        toast(toAdd.length ? `Added ${toAdd.length} item${toAdd.length === 1 ? "" : "s"} to the list`
+                           : "Those are already on your list");
+      } finally {
+        e.target.disabled = false;
       }
-      await refresh();
-      toast(toAdd.length ? `Added ${toAdd.length} item${toAdd.length === 1 ? "" : "s"} to the list`
-                         : "Those are already on your list");
     }),
-  }, `🛒 Add ${missing.length} missing to list`) : null;
+  }, `🛒 Add ${new Set(missing.map((i) => fold(i.name))).size} missing to list`) : null;
 
-  const thumb = r.thumb ? `${r.thumb}/small` : "";
-  return el("details", { class: "recipe", "data-id": r.id, open: isOpen },
+  const details = el("details", { class: "recipe", "data-id": r.id, open: isOpen });
+  const edit = r.canEdit && el("button", { class: "ghost", onclick: () => {
+    if (state.recipeEditing) return;
+    details.replaceWith(el("div", { class: "recipe", "data-id": r.id, open: true }, recipeEditor(r, {
+      save: (data) => api("PUT", `/api/recipes/${r.id}`, data),
+      done: () => guard(loadRecipes),
+    })));
+  } }, "Edit");
+  const remove = r.canEdit && el("button", { class: "ghost danger", onclick: () => guard(async () => {
+    if (!confirm(`Delete “${r.title}” from the recipe book?`)) return;
+    await api("DELETE", `/api/recipes/${r.id}`);
+    toast(`Deleted ${r.title}`);
+    await loadRecipes();
+  }) }, "Delete");
+
+  const host = hostOf(r.source);
+  details.append(
     el("summary", {},
-      thumb ? el("img", { class: "thumb", src: thumb, alt: "", loading: "lazy" }) : null,
       el("div", {},
-        el("div", { class: "title" }, r.name),
-        el("div", { class: "meta" }, [r.area, r.category].filter(Boolean).join(" · ")),
+        el("div", { class: "title" }, r.title),
+        el("div", { class: "meta" }, [r.servings && `Serves ${r.servings}`, host, r.origin === "generated" && "Generated",
+          r.mine && "Added by you"].filter(Boolean).join(" · ")),
         score)),
     el("div", { class: "recipe-body" },
-      el("div", { class: "row-actions" }, addMissing),
+      el("div", { class: "row-actions" }, addMissing, edit || null, remove || null),
+      r.origin === "generated"
+        ? el("p", { class: "muted small" }, "A recipe model wrote this. Check amounts, times, and temperatures before you cook it.")
+        : null,
       el("h3", {}, "Ingredients"),
       ingredients,
-      el("h3", {}, "Instructions"),
-      el("div", { class: "instructions" }, r.instructions),
-      el("div", { class: "links" },
-        r.source ? el("a", { href: r.source, target: "_blank", rel: "noopener" }, "Original recipe ↗") : null,
-        r.youtube ? el("a", { href: r.youtube, target: "_blank", rel: "noopener" }, "Video ↗") : null)));
+      r.steps.length ? el("h3", {}, "Steps") : null,
+      r.steps.length ? el("ol", { class: "steps" }, r.steps.map((s) => el("li", {}, s))) : null,
+      r.source ? el("div", { class: "links" },
+        el("a", { href: r.source, target: "_blank", rel: "noopener" }, `Original recipe${host ? ` on ${host}` : ""} ↗`)) : null));
+  return details;
+}
+
+// A form for writing or changing a recipe. save(data) sends it; done() runs after saving or cancelling.
+function recipeEditor(r, { save, done }) {
+  state.recipeEditing = true;
+  const close = () => { state.recipeEditing = false; done(); };
+  const rows = el("div", { class: "ing-rows" });
+  const addRow = (i = { quantity: "", name: "", note: "" }) => {
+    const row = el("div", { class: "ing-row" },
+      el("input", { name: "quantity", value: i.quantity, maxlength: 100, placeholder: "Amount", "aria-label": "Amount" }),
+      el("input", { name: "name", value: i.name, maxlength: 200, placeholder: "Ingredient", "aria-label": "Ingredient", list: "ingredients" }),
+      el("input", { name: "note", value: i.note, maxlength: 200, placeholder: "Note (chopped…)", "aria-label": "Note" }),
+      el("button", { type: "button", class: "small ghost", "aria-label": "Remove ingredient", onclick: () => row.remove() }, "✕"));
+    rows.append(row);
+    return row;
+  };
+  for (const i of r.ingredients) addRow(i);
+  if (!r.ingredients.length) addRow();
+
+  const form = el("form", {
+    class: "recipe-edit",
+    autocomplete: "off",
+    onsubmit: (e) => {
+      e.preventDefault();
+      const data = {
+        title: form.elements.title.value,
+        servings: form.servings.value,
+        source: form.source.value,
+        origin: r.origin || "hand",
+        ingredients: [...rows.children].map((row) => ({
+          quantity: row.querySelector("[name=quantity]").value,
+          name: row.querySelector("[name=name]").value,
+          note: row.querySelector("[name=note]").value,
+        })),
+        steps: form.steps.value.split("\n").map((s) => s.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean),
+      };
+      guard(async () => {
+        await save(data);
+        close();
+      });
+    },
+    onkeydown: (e) => { if (e.key === "Escape") close(); },
+  },
+    el("label", {}, "Title", el("input", { name: "title", value: r.title, required: true, maxlength: 200 })),
+    el("label", {}, "Serves", el("input", { name: "servings", value: r.servings, maxlength: 100, placeholder: "4" })),
+    el("label", {}, "Link to the original",
+      el("input", { name: "source", type: "url", value: r.source, maxlength: 2000, placeholder: "https://…" })),
+    el("h3", {}, "Ingredients"),
+    rows,
+    el("button", { type: "button", class: "small", onclick: () => addRow().querySelector("input").focus() }, "+ Ingredient"),
+    el("h3", {}, "Steps"),
+    el("label", { class: "muted small" }, "One step per line (blank lines are skipped)",
+      el("textarea", { name: "steps", rows: 10 }, r.steps.join("\n\n"))),
+    el("div", { class: "row-actions" },
+      el("button", { type: "button", class: "ghost", onclick: close }, "Cancel"),
+      el("button", { type: "submit", class: "primary" }, "Save")));
+  queueMicrotask(() => form.elements.title.focus());
+  return form;
+}
+
+// Opens the editor for a new recipe: blank, or a draft from the recipe generator to check over and save.
+function writeRecipe(draft) {
+  if (state.recipeEditing) return;
+  const recipe = draft || { title: "", servings: "", source: "", origin: "hand", ingredients: [], steps: [] };
+  $("#recipe-new").replaceChildren(el("div", { class: "card" },
+    draft ? el("p", { class: "muted small" },
+      "A recipe model wrote this. Fix anything odd (amounts, times, temperatures, and steps that don't fit), then save it.") : null,
+    recipeEditor(recipe, {
+      save: async (data) => {
+        const saved = await api("POST", "/api/recipes", data);
+        toast(`Added ${saved.title}`);
+        if (draft) closeSuggest();
+      },
+      done: () => { $("#recipe-new").replaceChildren(); guard(loadRecipes); },
+    })));
+  $("#recipe-new").scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+// ---------- Meal ideas ----------
+// Pick ingredients (your pantry's, newest first, and any typed in) and the recipe generator writes a few recipes that
+// use some of them. None is saved until you pick one, check it over in the editor, and save it.
+const MAX_SUGGEST_INGREDIENTS = 15;
+
+function openSuggest() {
+  const form = $("#suggest");
+  const seen = new Set();
+  const names = state.items.filter((i) => i.section === state.pantry).map((i) => i.name).filter((n) => {
+    const key = fold(n);
+    if (seen.has(key) || state.staples?.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  $("#suggest-picks").replaceChildren(...names.map((n, index) => el("button", {
+    type: "button", class: "chip", "aria-pressed": String(index < 6),
+    onclick: (e) => e.currentTarget.setAttribute("aria-pressed", String(e.currentTarget.getAttribute("aria-pressed") !== "true")),
+  }, n)));
+  if (!names.length) $("#suggest-picks").replaceChildren(el("p", { class: "muted small" }, "Your pantry is empty, so type some ingredients below."));
+  $("#suggestions").replaceChildren();
+  form.querySelector("[type=submit]").textContent = "Suggest meals";
+  form.hidden = false;
+  form.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function closeSuggest() {
+  $("#suggest").hidden = true;
+  $("#suggestions").replaceChildren();
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function renderSuggestion(draft) {
+  const names = draft.ingredients.map((i) => i.name);
+  return el("div", { class: "suggestion" },
+    el("div", {},
+      el("div", { class: "title" }, draft.title),
+      el("div", { class: "meta" }, `${plural(names.length, "ingredient")}, ${plural(draft.steps.length, "step")}: ` +
+        `${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}`)),
+    el("button", { type: "button", onclick: () => writeRecipe(draft) }, "Use this"));
+}
+
+function wireSuggest() {
+  const form = $("#suggest");
+  $("#suggest-meals").addEventListener("click", openSuggest);
+  $("#suggest-close").addEventListener("click", closeSuggest);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const picked = [...form.querySelectorAll(".chip[aria-pressed=true]")].map((b) => b.textContent);
+    const extra = form.extra.value.split(",").map((s) => s.trim()).filter(Boolean);
+    const ingredients = [...new Map([...picked, ...extra].map((n) => [fold(n), n])).values()];
+    if (!ingredients.length) return toast("Pick or type at least one ingredient");
+    if (ingredients.length > MAX_SUGGEST_INGREDIENTS) return toast(`Pick at most ${MAX_SUGGEST_INGREDIENTS} ingredients`);
+    const button = form.querySelector("[type=submit]");
+    guard(async () => {
+      button.disabled = true;
+      button.textContent = "Thinking up meals…";
+      $("#suggestions").replaceChildren(el("p", { class: "muted small" }, "This can take a minute."));
+      try {
+        const data = await api("POST", "/api/recipes/generate", { ingredients });
+        $("#suggestions").replaceChildren(...data.recipes.map(renderSuggestion));
+        button.textContent = "Suggest others";
+      } catch (err) {
+        $("#suggestions").replaceChildren();
+        button.textContent = "Suggest meals";
+        throw err;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+// Pasted text that's just a link is fetched by the server; anything else is read as the recipe itself.
+function wireRecipes() {
+  const form = $("#import-form");
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const value = form.source.value.trim();
+    if (!value) return;
+    const body = /^https?:\/\/\S+$/i.test(value) ? { url: value } : { text: value };
+    const button = form.querySelector("[type=submit]");
+    guard(async () => {
+      button.disabled = true;
+      button.textContent = "Reading the recipe…";
+      try {
+        const recipe = await api("POST", "/api/recipes/import", body);
+        form.reset();
+        toast(`Added ${recipe.title}`);
+        await loadRecipes();
+        const added = document.querySelector(`#recipes details[data-id="${recipe.id}"]`);
+        if (added) { added.open = true; added.scrollIntoView({ block: "start", behavior: "smooth" }); }
+      } finally {
+        button.disabled = false;
+        button.textContent = "Import recipe";
+      }
+    });
+  });
+  $("#write-recipe").addEventListener("click", () => writeRecipe());
+  wireSuggest();
 }
 
 // ---------- Adding items by hand ----------
-// Names typed into the shopping list or the pantry are matched against TheMealDB's ingredient list (the one recipes
-// use), so they say "Peanut Butter" and not "pnut butter", and recipes find them. The list fills the name fields'
-// suggestions as you type. A name that isn't on it gets the closest few to pick from, or can be added as typed
-// (paper towels aren't an ingredient).
+// Names typed into the shopping list or the pantry are matched against the names the list already uses (its recipes'
+// ingredients, and its items), so they're spelled the same way each time and recipes find them. Those names fill
+// the name fields' suggestions as you type. A name that isn't one of them gets the closest few to pick from, or can
+// be saved as typed.
 //
 // Turned off for the add forms (CHECK_WHEN_ADDING): the matches weren't good enough, so names are added as typed.
 // The suggestions as you type, and the check when renaming an item, still work.
@@ -561,7 +779,7 @@ function matchName(typed, panel, save, verb = "Add") {
   if (exact) return save(exact);
   const close = closestIngredients(typed);
   panel.replaceChildren(
-    el("p", {}, close.length ? `“${typed}” isn't in the food list. Did you mean:` : `“${typed}” isn't in the food list.`),
+    el("p", {}, close.length ? `“${typed}” isn't a name you've used before. Did you mean:` : `“${typed}” isn't a name you've used before.`),
     ...close.map((n) => el("button", { type: "button", class: "small", onclick: () => save(n) }, n)),
     el("button", { type: "button", class: "small ghost", onclick: () => save(typed) }, `${verb} “${typed}” anyway`),
   );
@@ -633,7 +851,9 @@ async function startScanner() {
   const video = $("#video");
   const status = $("#scan-status");
   status.textContent = "Starting camera…";
+  hideScanCard();
   dialog.showModal();
+  holdScannerUpright();
   Object.assign(scanner, { running: true, busy: false, last: null, unknown: new Set() });
 
   try {
@@ -677,6 +897,37 @@ function stopScanner() {
   scanner.stream = null;
   $("#video").srcObject = null;
   if ($("#scanner").open) $("#scanner").close();
+  releaseScannerUpright();
+}
+
+// The scanner stays where it was when the phone is turned sideways, like a camera app. Where the browser can lock the
+// screen (an installed app or full screen on Android), it does. Elsewhere the page still turns, so the dialog is turned
+// back by the same angle, and the video is turned forward inside it so the picture still lines up with the world.
+function screenAngle() {
+  const a = screen.orientation?.angle ?? window.orientation ?? 0;
+  return ((a % 360) + 360) % 360;
+}
+
+function orientScanner() {
+  const dialog = $("#scanner");
+  const a = dialog.open ? screenAngle() : 0;
+  dialog.style.setProperty("--turn", `${a}deg`);
+  dialog.classList.toggle("turned", a !== 0);
+  dialog.classList.toggle("sideways", a === 90 || a === 270);
+}
+
+function holdScannerUpright() {
+  screen.orientation?.lock?.("portrait").catch(() => {});
+  orientScanner();
+  screen.orientation?.addEventListener("change", orientScanner);
+  window.addEventListener("orientationchange", orientScanner);
+}
+
+function releaseScannerUpright() {
+  try { screen.orientation?.unlock?.(); } catch {}
+  screen.orientation?.removeEventListener("change", orientScanner);
+  window.removeEventListener("orientationchange", orientScanner);
+  orientScanner();
 }
 
 // ---------- Beeps ----------
@@ -729,10 +980,79 @@ async function lookupBarcode(code) {
   }
 }
 
-// Resolves once the item is saved. The list reloads in the background, so a beep doesn't wait for it.
+// Resolves once the item is saved, with the item, a message saying what happened, and the item as it was before (null
+// for a new one). A barcode already in the pantry isn't added again: the server raises that item's quantity instead.
+// The list reloads in the background, so a beep doesn't wait.
 async function addToPantry(name, quantity, barcode) {
-  await api("POST", "/api/items", { name, quantity, barcode, section: state.pantry });
+  const prior = state.items.find((i) => i.barcode === barcode && i.section === state.pantry);
+  const before = prior ? { ...prior } : null;
+  const item = await api("POST", "/api/items", { name, quantity, barcode, section: state.pantry });
   guard(refresh);
+  const message = before ? `${item.name} is now ${item.quantity || "1"}` : `Added ${item.name}`;
+  return { item, before, message };
+}
+
+// "Quantity" is free text. These step the count at its front, the way the server's _one_more does:
+// "" → "2", "3" → "4", "400 g" → "2 × 400 g", and back down again. Null when it can't go lower.
+const COUNT_OF = /^(\d+)(?:\s*[×x]\s*(.+))?$/;
+function oneMore(q) {
+  const m = q.trim().match(COUNT_OF);
+  if (!m) return q.trim() ? `2 × ${q.trim()}` : "2";
+  const n = Number(m[1]) + 1;
+  return m[2] ? `${n} × ${m[2]}` : String(n);
+}
+function oneLess(q) {
+  const m = q.trim().match(COUNT_OF);
+  if (!m || Number(m[1]) <= 1) return null;
+  const n = Number(m[1]) - 1;
+  if (m[2]) return n === 1 ? m[2] : `${n} × ${m[2]}`;
+  return String(n);
+}
+
+// The card under the camera for the item the last scan added: change its quantity, or take the scan back if it was
+// the wrong item. Taking it back deletes a new item, and puts an item that was already there back to its old quantity.
+function showScanCard({ item, before }) {
+  const card = $("#scan-card");
+  const status = $("#scan-status");
+  const qty = el("input", { value: item.quantity, maxlength: 200, placeholder: "1", "aria-label": `Quantity of ${item.name}` });
+  const minus = el("button", { type: "button", class: "ghost", "aria-label": "One less" }, "−");
+  const sync = () => { minus.disabled = oneLess(qty.value) === null; };
+  const save = (value) => guard(async () => {
+    qty.value = value;
+    sync();
+    item = await api("PUT", `/api/items/${item.id}`, { quantity: value });
+    status.textContent = `${item.name}: ${item.quantity || "1"}`;
+    await refresh();
+  });
+  minus.onclick = () => { const v = oneLess(qty.value); if (v !== null) save(v); };
+  qty.onchange = () => save(qty.value);
+  qty.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); qty.blur(); } };
+  const undo = el("button", {
+    type: "button", class: "ghost danger",
+    onclick: () => guard(async () => {
+      if (before) await api("PUT", `/api/items/${item.id}`, { quantity: before.quantity });
+      else await api("DELETE", `/api/items/${item.id}`);
+      hideScanCard();
+      status.textContent = before ? `${item.name} is back to ${before.quantity || "1"}. Scan the next item.`
+                                  : `Removed ${item.name}. Scan the next item.`;
+      await refresh();
+    }),
+  }, before ? "Undo" : "Delete");
+  card.replaceChildren(
+    el("div", { class: "name" }, item.name),
+    undo,
+    el("div", { class: "stepper" },
+      minus,
+      qty,
+      el("button", { type: "button", class: "ghost", "aria-label": "One more", onclick: () => save(oneMore(qty.value)) }, "+")),
+  );
+  sync();
+  card.hidden = false;
+}
+
+function hideScanCard() {
+  $("#scan-card").hidden = true;
+  $("#scan-card").replaceChildren();
 }
 
 // One barcode from the camera. Called for every frame that has one, so it skips while the last one is still being
@@ -742,6 +1062,7 @@ async function onScanned(code) {
   if (scanner.busy || scanner.unknown.has(code) || (scanner.last?.code === code && now - scanner.last.at < SAME_CODE_MS)) return;
   scanner.busy = true;
   const status = $("#scan-status");
+  let added;
   try {
     status.textContent = `Looking up ${code}…`;
     const info = await lookupBarcode(code);
@@ -757,14 +1078,15 @@ async function onScanned(code) {
       return;
     }
     try {
-      await addToPantry(info.name, info.quantity || "", code);
+      added = await addToPantry(info.name, info.quantity || "", code);
     } catch (e) {
       beep(false);
       status.textContent = `Couldn't add ${info.name}: ${e.message}`;
       return;
     }
     beep();
-    status.textContent = `Added ${info.name}. Scan the next item.`;
+    status.textContent = `${added.message}. Scan the next item.`;
+    showScanCard(added);
   } finally {
     scanner.last = { code, at: Date.now() };
     scanner.busy = false;
@@ -777,8 +1099,7 @@ async function lookupTyped(code) {
   const info = await lookupBarcode(code);
   if (!info.found) return askForName(code, info);
   await guard(async () => {
-    await addToPantry(info.name, info.quantity || "", code);
-    toast(`Added ${info.name} to pantry`);
+    toast(`${(await addToPantry(info.name, info.quantity || "", code)).message} in the pantry`);
   });
 }
 
@@ -805,8 +1126,7 @@ $("#confirm").addEventListener("close", () => {
   const name = form.name.value.trim();
   if (!name) return toast("Name is required");
   guard(async () => {
-    await addToPantry(name, form.quantity.value, form.barcode.value);
-    toast(`Added ${name} to pantry`);
+    toast(`${await addToPantry(name, form.quantity.value, form.barcode.value)} in the pantry`);
   });
 });
 
@@ -855,7 +1175,7 @@ async function startList() {
     await addToPantry(name, $("#pantry-add-form").quantity.value);
     toast(`Added ${name} to pantry`);
   });
-  loadIngredients().catch(() => {}); // suggestions are a nice-to-have; adding works without them
+  wireRecipes();
 
   for (const tab of document.querySelectorAll(".tab")) {
     tab.addEventListener("click", () => showView(tab.dataset.view));
