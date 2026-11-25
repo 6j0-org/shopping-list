@@ -13,7 +13,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+# --no-compile: byte-compiling PyTorch's thousands of files takes most of an hour under the emulation CI uses to
+# build the arm64 image. The read-only container can't cache .pyc files anyway; Python compiles in memory at start.
+RUN pip install --no-compile --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 
 # Pinned to a commit of the model repository, so a rebuild gets the same model. Only the files PyTorch needs.
 ARG MODEL=flax-community/t5-recipe-generation
