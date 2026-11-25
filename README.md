@@ -47,7 +47,7 @@ Every option can also be set with an environment variable (`python3 server.py --
 | `ALLOWED_SUBS` | empty | Only for [upgrading from one shared list](#run): the 6j0.org identities (their `sub`), comma- or space-separated, that shared it. |
 | `ADMIN_SUB` | unset | The 6j0.org identity that can close and delete anyone's feedback, and whose posts and replies are labeled "Developer". |
 | `ORIGIN` | unset | This app's public origin, e.g. `https://shopping-list.6j0.org`. `https:` turns on `Secure` cookies. |
-| `ANTHROPIC_API_KEY` | unset | A [Claude API](https://platform.claude.com/) key, for importing recipes. Without it, the import box is hidden. |
+| `ANTHROPIC_API_KEY` | unset | A [Claude API](https://platform.claude.com/) key, for importing recipes ([getting one](#getting-an-anthropic-api-key)). Without it, the import box is hidden. |
 | `RECIPEGEN_URL` | unset | The [recipe generator](#generating-meal-ideas), e.g. `http://recipegen:8001`. Without it, the Suggest meals button is hidden. |
 
 To try it locally, run the identity server on `localhost` and this app on `127.0.0.1` (cookies ignore the port, so
@@ -196,6 +196,36 @@ so a request Claude's safety checks decline is retried on another model. Notes:
 - Each import is a paid API call, so there are at most 20 a day per account and 200 a day in all
   (`RECIPE_LIMITS` in `server.py`). A recipe page usually comes to a few
   thousand tokens, about a cent.
+
+#### Getting an Anthropic API key
+
+A claude.ai account doesn't come with an API key. The API is billed separately from a claude.ai subscription, which
+doesn't cover API use, and keys come from the Claude Console:
+
+1. Sign in at [platform.claude.com](https://platform.claude.com). The same email as your claude.ai account works; it's
+   a separate account on the same sign-in.
+2. Under **Settings → Billing**, buy some prepaid credits. Requests fail until there's a balance. An import costs about
+   a cent, so $5 lasts a long time.
+3. Optionally, set a monthly spend limit under **Settings → Limits**, as a backstop to the app's own daily limits.
+4. Under **Settings → API Keys**, choose **Create Key** and name it after the app (`shopping-list`). The key starts
+   with `sk-ant-` and is shown only once, so copy it straight into the secret.
+
+In the cluster, the key goes in the `worclustershire-deploy` repo's `apps/shopping-list/helm_secrets.yaml`: the chart's
+values, encrypted with SOPS. The chart turns its `envSecret` map into environment variables. Open the file with `sops`,
+never a plain editor:
+
+```sh
+sops apps/shopping-list/helm_secrets.yaml
+```
+
+and add the key under `envSecret` (adding that map if the file doesn't have it yet):
+
+```yaml
+envSecret:
+  ANTHROPIC_API_KEY: "sk-ant-..."
+```
+
+Save, commit, and push. Flux decrypts it, the app restarts, and the import box appears on the Recipes tab.
 
 ### Generating meal ideas
 
