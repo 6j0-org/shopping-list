@@ -1,4 +1,4 @@
-"""A stand-in for a 6j0.org identity server in tests: serves a JWKS on localhost and signs tokens the way the real
+"""A stand-in for the 6j0.org ID server in tests: serves a JWKS on localhost and signs tokens the way the real
 one's tokens.js does (EdDSA JWTs with iss, sub, aud, nonce or events, iat, exp, and jti)."""
 
 import base64

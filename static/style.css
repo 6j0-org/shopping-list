@@ -10,6 +10,8 @@
   --checked: #a3a9a5;
   --radius: 10px;
   --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  --warn-bg: #f6e7c4;
+  --warn-text: #5c4204;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
@@ -23,6 +25,8 @@
     --accent-text: #0d1a12;
     --danger: #f2827a;
     --checked: #5d6560;
+    --warn-bg: #3d3216;
+    --warn-text: #f3dca2;
   }
 }
 
@@ -261,6 +265,14 @@ dialog label input { color: var(--text); font-size: 1rem; }
 .card p:last-child { margin-bottom: 0; }
 .error { color: var(--danger); }
 .card .error { margin: 12px 0 0; }
+/* A temporary 6j0 ID, not saved yet (app.js showIdUnsaved). */
+.id-unsaved {
+  display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap;
+  background: var(--warn-bg); color: var(--warn-text);
+  border-radius: var(--radius); padding: 10px 14px; margin: 12px 0;
+}
+.id-unsaved span { flex: 1 1 240px; }
+.id-unsaved a { color: inherit; font-weight: 600; }
 .id-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .members { list-style: none; padding: 0; margin: 8px 0 12px; }
 .members li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }

@@ -1,12 +1,12 @@
-// Sign-in with a 6j0.org identity (https://gitlab.com/6j0-org/id).
+// Sign-in with a 6j0 ID (https://gitlab.com/6j0-org/id).
 //
 // 1. startIdSignIn: make a random nonce and an ephemeral ECDH P-256 key pair, and go to
 //    <idOrigin>/authorize?app=<idApp>&nonce=<nonce>&epk=<x>.<y>.
-// 2. The identity server signs the person in and sends the browser back here with
+// 2. The ID server signs the person in and sends the browser back here with
 //    #id_token=<signed token>&epk=…&key=…&state=<nonce>. The fragment never reaches any server.
 // 3. finishIdSignIn: check the nonce and have the server verify the token, which starts a session.
 //
-// The identity server always hands over this app's encryption key (`key`, encrypted to the ECDH key), since other
+// The ID server always hands over this app's encryption key (`key`, encrypted to the ECDH key), since other
 // 6j0.org apps encrypt their data with it. A shopping list can be shared and isn't end-to-end encrypted, so it ignores
 // the key and throws the private key away right after making it: only the nonce is kept.
 

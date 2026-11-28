@@ -8,7 +8,7 @@ A small self-hosted shopping list. Python 3's standard library, plus [`cryptogra
 - **Pantry** tab: scan barcodes with your phone camera to record what you already have. The camera stays on: each product it finds in the barcode databases goes straight into the pantry with a beep, so you can scan one item after another. Scanning something already in the pantry raises its quantity instead of adding it twice: "400 g" becomes "2 × 400 g", then "3 × 400 g". A barcode the databases don't know gets a low beep instead: set that item aside, keep scanning, and add the set-aside items by hand when you close the scanner. The pantry lists the newest items first, so a bad scan is easy to spot and delete. The 🛒 button on a pantry item adds it to the shopping list.
 - **Settings** tab: turn on the extras that are hidden to keep things simple: search, a quantity box and an aisle menu on the add forms, and typing a barcode number on the Pantry page. All are off to start, and they're saved with each person's account, so they follow you across devices and people sharing a list can set them differently. Turning one off only hides it; nothing already saved changes.
 - **Recipes** tab: one recipe book that everyone who uses the app shares. Add a recipe two ways: write it yourself, or paste a link and Claude reads the page and writes it up the same way every time (a title, servings, ingredients with amount, name, and a note like "chopped", and numbered steps), with a link back to the original and no photos (if a site won't let the server read it, paste the recipe's text instead). Only the person who added a recipe (and the admin) can edit or delete it. Each recipe shows which ingredients your pantry covers, with the fewest missing first; choose how many missing ingredients are OK (0–3 or any). "Add N missing to list" puts what you lack on the shopping list.
-- **Accounts:** people sign in with an anonymous identity from a [6j0.org identity server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one passkey (or username and password) covers every 6j0.org app. Everyone who signs in gets their own list and pantry, empty to start.
+- **Accounts:** people sign in with an anonymous 6j0 ID from the [6j0.org ID server](https://gitlab.com/6j0-org/id) (`id.6j0.org`), so one account key covers every 6j0.org app. Everyone who signs in gets their own list and pantry, empty to start. Settings links to the ID server to delete your account.
 - **Share** button: make an invite link and send it to someone (a household, say). When they open it and choose Join, you share one list and pantry. Each link works once, for 7 days. Anyone on a list can invite people, take people off it, or leave; whoever is taken off or leaves starts over with an empty list.
 - **Siri** button: make a personal token so an iPhone or iPad shortcut can add items when you ask Siri ("Hey Siri, add to shopping list"). The dialog walks through building the shortcut. The token can only add items to your list (`POST /api/shortcut/items`), and it follows you if you join someone else's list. Making a new one replaces the old one, and you can turn it off. Names from Siri lose dictation's trailing period and take your list's spelling when it already uses the name ("peanut butter." becomes "Peanut Butter").
 - Leave it alone for 15 seconds and, one time in ten, Hot Dog Man leans in from the side of the screen (`static/hotdog.js`). One click, tap, or key press sends him away, and it doesn't reach whatever was under him. He stays out of open dialogs, like the scanner. Once you've sent him away, an "I like hot dogs" setting appears in Settings: it's on, and turning it off keeps him away for good.
@@ -21,11 +21,11 @@ pip install -r requirements.txt   # cryptography, for Ed25519 sign-in tokens
 ID_ORIGIN=https://id.6j0.org python3 server.py   # http://localhost:8000
 ```
 
-The identity server must list this app in its `APPS`, with the origin people open it at (e.g.
+The ID server must list this app in its `APPS`, with the origin people open it at (e.g.
 `APPS=shopping-list=https://shopping-list.6j0.org`), since it only sends sign-ins back to that origin.
 
-**Upgrading from one shared list.** Before lists were per person, there was one list, shared by the identities in
-`ALLOWED_SUBS`. On startup, the server puts the items that belong to no list, and the identities in `ALLOWED_SUBS`
+**Upgrading from one shared list.** Before lists were per person, there was one list, shared by the 6j0 IDs in
+`ALLOWED_SUBS`. On startup, the server puts the items that belong to no list, and the IDs in `ALLOWED_SUBS`
 that don't have a list yet, on one list together, and logs what it did. Without `ALLOWED_SUBS`, those items stay put
 (and the server says so at startup), and everyone who signs in starts with an empty list. Once it has run, you can
 remove `ALLOWED_SUBS`.
@@ -41,15 +41,15 @@ Every option can also be set with an environment variable (`python3 server.py --
 | `SHOPPING_DB` | `shopping.db` next to `server.py` | SQLite database |
 | `SHOPPING_FEEDBACK` | `feedback.jsonl` next to the database | [Feedback](#feedback) file |
 | `SHOPPING_CERT`, `SHOPPING_KEY` | unset | TLS certificate and key (PEM) to serve HTTPS |
-| `ID_ORIGIN` | required | The 6j0.org identity server, e.g. `https://id.6j0.org` |
-| `ID_APP` | `shopping-list` | This app's name in the identity server's `APPS`. Never rename it. |
-| `ID_JWKS_URL` | `ID_ORIGIN/.well-known/jwks.json` | Where to fetch the identity server's public keys (e.g. an in-cluster Service URL) |
-| `ALLOWED_SUBS` | empty | Only for [upgrading from one shared list](#run): the 6j0.org identities (their `sub`), comma- or space-separated, that shared it. |
-| `ADMIN_SUB` | unset | The 6j0.org identity that can close and delete anyone's feedback, and whose posts and replies are labeled "Developer". |
+| `ID_ORIGIN` | required | The 6j0.org ID server, e.g. `https://id.6j0.org` |
+| `ID_APP` | `shopping-list` | This app's name in the ID server's `APPS`. Never rename it. |
+| `ID_JWKS_URL` | `ID_ORIGIN/.well-known/jwks.json` | Where to fetch the ID server's public keys (e.g. an in-cluster Service URL) |
+| `ALLOWED_SUBS` | empty | Only for [upgrading from one shared list](#run): the 6j0 IDs (their `sub`), comma- or space-separated, that shared it. |
+| `ADMIN_SUB` | unset | The 6j0 ID that can close and delete anyone's feedback, and whose posts and replies are labeled "Developer". |
 | `ORIGIN` | unset | This app's public origin, e.g. `https://shopping-list.6j0.org`. `https:` turns on `Secure` cookies. |
 | `ANTHROPIC_API_KEY` | unset | A [Claude API](https://platform.claude.com/) key, for importing recipes ([getting one](#getting-an-anthropic-api-key)). Without it, the import box is hidden. |
 
-To try it locally, run the identity server on `localhost` and this app on `127.0.0.1` (cookies ignore the port, so
+To try it locally, run the ID server on `localhost` and this app on `127.0.0.1` (cookies ignore the port, so
 two apps on one hostname would overwrite each other's session cookie):
 
 ```sh
@@ -63,18 +63,26 @@ ID_ORIGIN=http://localhost:4000 python3 server.py   # open http://127.0.0.1:8000
 
 1. "Sign in with 6j0.org" (`static/signin.js`) makes a random nonce and an ephemeral ECDH key pair, and goes to
    `ID_ORIGIN/authorize?app=shopping-list&nonce=…&epk=…`.
-2. The identity server signs the person in and sends the browser back to `/` with a signed token (an Ed25519 JWT)
+2. The ID server signs the person in and sends the browser back to `/` with a signed token (an Ed25519 JWT)
    in the URL fragment, which never reaches a server. It also sends this app's encryption key, encrypted to the
    ECDH key. Other 6j0.org apps encrypt their data with it; a list can be shared and isn't end-to-end encrypted, so the
    page ignores it (and never kept the ECDH private key).
 3. The page checks the nonce and posts the token to `/api/id/login`. `idtoken.py` verifies the signature against
-   the identity server's JWKS, plus `iss`, `aud`, `exp`, `nonce`, and one-time use (`jti`). The server then finds
+   the ID server's JWKS, plus `iss`, `aud`, `exp`, `nonce`, and one-time use (`jti`). The server then finds
    or creates the account for the token's `sub` (with a new, empty list) and sets a session cookie (`HttpOnly`,
    `SameSite=Lax`, 30 days; the database stores only its SHA-256).
 
-Deleting an identity at `id.6j0.org` makes the identity server `POST` a signed notice to `/api/id/deleted`. The
-server then deletes that account, its sessions, and everything it wrote in Feedback. If nobody else is on its list,
-the list and its items go too; otherwise they stay with the others.
+**Temporary 6j0 IDs.** Someone who starts with the ID server's temporary ID hasn't saved its account key yet, so
+the ID lives only in the browser that made it, and the token says `saved: false`. The server records that
+(`users.id_saved`), and `/api/me` says `idUnsaved`, so the page warns at the top with a link to `ID_ORIGIN/#save`.
+To notice a save, the page signs in again (an instant redirect while the ID server still has the ID): on the next
+start within a day of following that link, and otherwise once a week (`idRecheck`). That also keeps the ID in use,
+since the ID server deletes temporary IDs nobody uses for 90 days. Tokens without `saved` count as saved.
+
+**Deleting a 6j0 ID.** Settings links to `ID_ORIGIN/#delete`. Deleting the 6j0 ID there makes the ID server `POST`
+a signed notice to `/api/id/deleted` (no `nonce`, and `events: {"6j0/v1/identity-deleted": {}}`). The server then
+deletes that account, its sessions, and everything it wrote in Feedback. If nobody else is on its list, the list
+and its items go too; otherwise they stay with the others.
 
 Requests marked `Sec-Fetch-Site: cross-site` that change data are refused.
 
@@ -84,7 +92,7 @@ The Feedback button in the header opens a page where signed-in people read every
 plain text, up to 2048 characters. Each post is a chat: tapping it opens its thread, where anyone can reply. Posts
 and replies show no author (the post's author is "Tester" in its thread); the server files each one under the
 account's random public ID so people can edit and delete their own. Each account can post, reply, or edit 100 times
-a day, and everyone together 500 times a day. Set `ADMIN_SUB` to your identity's `sub` to close threads as Done or
+a day, and everyone together 500 times a day. Set `ADMIN_SUB` to your 6j0 ID's `sub` to close threads as Done or
 Won't do (or reopen them), delete anyone's posts, and have yours labeled "Developer".
 
 Feedback is shared and isn't encrypted, and the page says so. It's kept in `feedback.jsonl`, one JSON object per
@@ -107,9 +115,9 @@ python3 -m unittest discover -s tests -t .
 `tests/test_recipes.py` tests reading recipe pages and matching, without the network or Claude.
 `tests/test_feedback.py` tests `feedback.py` on its own (a port of the Node apps' feedback test, plus checks that it
 reads files the Node version wrote). `tests/test_idtoken.py` and `tests/test_server.py` run against a stand-in
-identity server (`tests/fakeid.py`) that signs tokens like the real one: sign-in, a list per person, invites, the
-upgrade from one shared list, the shared recipe book (with Claude stubbed out), feedback, identity
-deletion, and refused tokens.
+ID server (`tests/fakeid.py`) that signs tokens like the real one: sign-in, a list per person, invites, the
+upgrade from one shared list, the shared recipe book (with Claude stubbed out), feedback, temporary and deleted 6j0 IDs,
+and refused tokens.
 
 ### Container
 
@@ -156,7 +164,7 @@ sudo nft insert rule inet filter input tcp dport 8000 accept
 python3 server.py --host 0.0.0.0 --cert cert.pem --key key.pem
 ```
 
-On the phone, open `https://<LAN-IP>:8000` and accept the certificate warning. Signing in only works at an origin the identity server lists in its `APPS` (here, `https://<LAN-IP>:8000`). Without HTTPS everything except the camera still works, and you can type barcode numbers in by hand.
+On the phone, open `https://<LAN-IP>:8000` and accept the certificate warning. Signing in only works at an origin the ID server lists in its `APPS` (here, `https://<LAN-IP>:8000`). Without HTTPS everything except the camera still works, and you can type barcode numbers in by hand.
 
 ## Barcode lookups
 
@@ -167,7 +175,7 @@ Barcodes are looked up server-side and cached in the database:
 
 If neither database knows the product, you type the name in yourself.
 
-The page's footer credits the open services the app runs on: Open Food Facts, the 6j0.org identity server, and ZXing on jsDelivr. UPCitemdb is a commercial trial API, so it isn't listed.
+The page's footer credits the open services the app runs on: Open Food Facts, the 6j0.org ID server, and ZXing on jsDelivr. UPCitemdb is a commercial trial API, so it isn't listed.
 
 Scanning uses the browser's built-in `BarcodeDetector` (Chrome/Android). On iOS Safari and Firefox it loads [ZXing](https://github.com/zxing-js/browser) from jsDelivr instead.
 
@@ -176,8 +184,8 @@ Scanning uses the browser's built-in `BarcodeDetector` (Chrome/Android). On iOS 
 There's one recipe book (the `recipe_book` table) for everyone who uses the app. A recipe is `{title, servings,
 source, origin, ingredients: [{quantity, name, note}], steps: [...]}`, where `origin` is `hand`, `link`, or
 `generated` (saved from a recipe generator the app no longer has). Each recipe records who added it; only they and
-`ADMIN_SUB` can change or delete it, and the API shows only whether you may (`mine`, `canEdit`), never who. When an
-identity is deleted its recipes stay, without an author. Which ingredients you have comes from your own list's pantry.
+`ADMIN_SUB` can change or delete it, and the API shows only whether you may (`mine`, `canEdit`), never who. When a
+6j0 ID is deleted its recipes stay, without an author. Which ingredients you have comes from your own list's pantry.
 
 **Importing** (`recipes.py`): the server fetches the pasted link and keeps only what describes the recipe: the page's
 [schema.org `Recipe`](https://schema.org/Recipe) data (JSON-LD, which most recipe sites include) without its photos,
@@ -243,9 +251,9 @@ takes an API token instead) needs a session; without one it answers 401. Items a
 |---|---|---|
 | GET | `/api/config` | `{idOrigin, idApp}` |
 | POST | `/api/id/login` | `{token, nonce}` → `{ok}` and sets the session cookie |
-| POST | `/api/id/deleted` | `{token}`, a signed deletion notice from the identity server; erases that account |
+| POST | `/api/id/deleted` | `{token}`, a signed deletion notice from the ID server; erases that account |
 | POST | `/api/logout` | Ends the session |
-| GET | `/api/me` | `{isAdmin, settings}`; `settings` is `{search, quantity, aisle, barcodeTyping, hotDogs, metHotDogMan}`, each true or false (`hotDogs` starts true, the rest false; `metHotDogMan` turns true when you first send Hot Dog Man away, and shows the `hotDogs` setting) |
+| GET | `/api/me` | `{isAdmin, settings}`, plus `idUnsaved` and `idRecheck` for a temporary 6j0 ID; `settings` is `{search, quantity, aisle, barcodeTyping, hotDogs, metHotDogMan}`, each true or false (`hotDogs` starts true, the rest false; `metHotDogMan` turns true when you first send Hot Dog Man away, and shows the `hotDogs` setting) |
 | PUT/PATCH | `/api/settings` | Any of the settings (true or false) → all of them |
 | GET | `/api/token` | `{token: null, created?, lastUsed?}`: whether you have an API token (times in ms; `lastUsed` is 0 if never) |
 | POST | `/api/token` | → `{token, created, lastUsed}`, a new API token, replacing any old one. The only time the token is shown |

@@ -27,11 +27,18 @@
   <main>
     <p id="loading" class="empty">Loading…</p>
 
+    <!-- A temporary 6j0 ID (see static/app.js) -->
+    <div id="id-unsaved" class="id-unsaved" role="note" hidden>
+      <span><b>You haven't saved your 6j0 ID.</b> If you clear this browser's data or lose this device, you lose your
+        list, for good.</span>
+      <a id="id-save" href="#">Save my ID</a>
+    </div>
+
     <!-- Signed out -->
     <section id="view-signin" class="view" hidden>
       <div class="card">
         <h2>Sign in</h2>
-        <p>The shopping list uses your 6j0.org identity: one username and password for every 6j0.org app.</p>
+        <p>The shopping list uses your anonymous 6j0 ID: one account key for every 6j0.org app.</p>
         <button id="signin-btn" class="primary big">Sign in with 6j0.org</button>
         <p id="signin-error" class="error" role="alert" hidden></p>
       </div>
@@ -135,6 +142,13 @@
           <input type="checkbox" data-setting="hotDogs">
           <span><b>I like hot dogs</b><br><span class="muted small">Hot Dog Man drops by now and then when you leave the app alone. Turn this off and he never comes back.</span></span>
         </label>
+      </div>
+      <div class="card">
+        <h2>Delete your account</h2>
+        <p class="muted small">Your shopping list account belongs to your 6j0 ID, so you delete it there:
+          <a id="delete-at-id" href="#">delete your 6j0 ID</a>. That deletes everything you have in every 6j0.org
+          app, including this list (unless someone else is still on it) and your feedback. Recipes you added stay in
+          the recipe book, with no author.</p>
       </div>
     </section>
   </main>

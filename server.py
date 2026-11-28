@@ -47,8 +47,8 @@ _db_lock = threading.Lock()
 _db = None
 _feedback = None
 
-# Sign-in (see main()): people sign in with an identity from a 6j0.org identity server. Each identity gets its own
-# list (and pantry), and can share it by invite link.
+# Sign-in (see main()): people sign in with a 6j0 ID from the 6j0.org ID server. Each 6j0 ID gets its own list (and
+# pantry), and can share it by invite link.
 _auth = {
     "id_origin": "",
     "id_app": "shopping-list",
@@ -84,7 +84,7 @@ def init_db(path):
             result     TEXT NOT NULL,
             fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        -- One row per 6j0.org identity (sub) that has signed in. guid is a random public ID for the account (never
+        -- One row per 6j0 ID (sub) that has signed in. guid is a random public ID for the account (never
         -- the sub), which feedback posts are filed under.
         CREATE TABLE IF NOT EXISTS users (
             id      INTEGER PRIMARY KEY,
@@ -147,20 +147,25 @@ def init_db(path):
     # Each person's settings (see SETTINGS), as JSON. Databases from before there were settings lack the column.
     if "settings" not in {r["name"] for r in _db.execute("PRAGMA table_info(users)")}:
         _db.execute("ALTER TABLE users ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")
+    # Whether the 6j0 ID's account key is saved, from the sign-in token's saved claim (see set_saved). Databases from
+    # before temporary IDs lack the columns.
+    if "id_saved" not in {r["name"] for r in _db.execute("PRAGMA table_info(users)")}:
+        _db.execute("ALTER TABLE users ADD COLUMN id_saved INTEGER")
+        _db.execute("ALTER TABLE users ADD COLUMN checked INTEGER")
     _db.execute("CREATE INDEX IF NOT EXISTS items_list ON items (list_id)")
     _db.commit()
 
 
 def claim_unowned(subs):
     """Upgrade a database from when there was one list, shared by ALLOWED_SUBS: put the items that belong to no list,
-    and those identities, on one list. Identities that already have a list keep it. Returns a line to log, or None."""
+    and those 6j0 IDs, on one list. IDs that already have a list keep it. Returns a line to log, or None."""
     subs = sorted(subs)
     with _db_lock:
         orphans = _db.execute("SELECT COUNT(*) FROM items WHERE list_id IS NULL").fetchone()[0]
         if not subs:
             if orphans:
                 return (f"{orphans} items from before lists were per person belong to no list. Set ALLOWED_SUBS "
-                        "to the identities that shared it, and restart, to give it back to them.")
+                        "to the 6j0 IDs that shared it, and restart, to give it back to them.")
             return None
         rows = _db.execute(
             f"SELECT sub, list_id FROM users WHERE sub IN ({','.join('?' * len(subs))})", subs
@@ -178,7 +183,7 @@ def claim_unowned(subs):
                     (sub, secrets.token_hex(16), _now_ms(), target),
                 )
         _db.commit()
-    return f"ALLOWED_SUBS: put {orphans} unowned {'item' if orphans == 1 else 'items'} and {len(homeless)} {'identity' if len(homeless) == 1 else 'identities'} on list {target}."
+    return f"ALLOWED_SUBS: put {orphans} unowned {'item' if orphans == 1 else 'items'} and {len(homeless)} {'ID' if len(homeless) == 1 else 'IDs'} on list {target}."
 
 
 # --- Accounts and sessions ------------------------------------------------
@@ -205,7 +210,7 @@ def _member_count(list_id):
 
 
 def account_for(sub):
-    """Find or create the account for a verified 6j0.org identity, with a new, empty list of its own if it has none.
+    """Find or create the account for a verified 6j0 ID, with a new, empty list of its own if it has none.
     Returns its users.id."""
     with _db_lock:
         row = _db.execute("SELECT id, list_id FROM users WHERE sub = ?", (sub,)).fetchone()
@@ -222,6 +227,25 @@ def account_for(sub):
             ).lastrowid
         _db.commit()
         return user_id
+
+
+def set_saved(user_id, saved):
+    """Record what a sign-in token said about the 6j0 ID: saved is False for a temporary ID (made at the ID server
+    and not saved there yet, so it lives in one browser), and True or missing otherwise, which counts as saved."""
+    with _db_lock:
+        _db.execute("UPDATE users SET id_saved = ?, checked = ? WHERE id = ?", (0 if saved is False else 1, _now_ms(), user_id))
+        _db.commit()
+
+
+def id_unsaved(user):
+    """For /api/me: {idUnsaved, idRecheck} for a temporary 6j0 ID, or {}. The page warns, with a link to save it at
+    the ID server, and signs in again when idRecheck says sign-in last checked a week or more ago, to notice a save
+    (which also keeps the ID in use, so the ID server doesn't delete it as unused)."""
+    with _db_lock:
+        row = _db.execute("SELECT id_saved, checked FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not row or row["id_saved"] != 0:
+        return {}
+    return {"idUnsaved": True, "idRecheck": not row["checked"] or row["checked"] < _now_ms() - 7 * DAY_MS}
 
 
 def new_session_cookie(user_id):
@@ -263,7 +287,7 @@ def end_session(token):
 
 
 def erase_account(sub):
-    """The identity was deleted: erase its account, sessions, and feedback, and its list if nobody else is on it.
+    """The 6j0 ID was deleted: erase its account, sessions, and feedback, and its list if nobody else is on it.
     Recipes it added stay in the recipe book, without an author."""
     with _db_lock:
         row = _db.execute("SELECT id, guid, list_id FROM users WHERE sub = ?", (sub,)).fetchone()
@@ -984,12 +1008,13 @@ class Handler(SimpleHTTPRequestHandler):
                 raise HttpError(HTTPStatus.UNAUTHORIZED, str(e))
             except idtoken.JwksError as e:
                 print(e, file=sys.stderr)
-                raise HttpError(HTTPStatus.BAD_GATEWAY, "Couldn't reach the 6j0.org identity server. Please try again.")
+                raise HttpError(HTTPStatus.BAD_GATEWAY, "Couldn't reach the 6j0.org ID server. Please try again.")
             user_id = account_for(claims["sub"])
+            set_saved(user_id, claims.get("saved"))
             return self._send_json(HTTPStatus.OK, {"ok": True}, {"Set-Cookie": new_session_cookie(user_id)})
 
-        # The identity server says an identity was deleted. Answers 200 also when there's no such account, so the
-        # identity server stops retrying.
+        # The ID server says a 6j0 ID was deleted. Answers 200 also when there's no such account, so the ID server
+        # stops retrying.
         if path == "/api/id/deleted" and method == "POST":
             body = self._read_json()
             try:
@@ -1000,7 +1025,7 @@ class Handler(SimpleHTTPRequestHandler):
                 raise HttpError(HTTPStatus.UNAUTHORIZED, str(e))
             except idtoken.JwksError as e:
                 print(e, file=sys.stderr)
-                raise HttpError(HTTPStatus.BAD_GATEWAY, "Couldn't load the identity server's keys.")
+                raise HttpError(HTTPStatus.BAD_GATEWAY, "Couldn't load the ID server's keys.")
             erase_account(claims["sub"])
             return self._send_json(HTTPStatus.OK, {"ok": True})
 
@@ -1019,7 +1044,7 @@ class Handler(SimpleHTTPRequestHandler):
             raise HttpError(HTTPStatus.UNAUTHORIZED, "Please sign in.")
 
         if path == "/api/me" and method == "GET":
-            return self._send_json(HTTPStatus.OK, {"isAdmin": feedback_who(user)["admin"], "settings": get_settings(user)})
+            return self._send_json(HTTPStatus.OK, {"isAdmin": feedback_who(user)["admin"], "settings": get_settings(user), **id_unsaved(user)})
         if path == "/api/settings" and method in ("PUT", "PATCH"):
             return self._send_json(HTTPStatus.OK, update_settings(user, self._read_json()))
 
@@ -1161,11 +1186,11 @@ def main():
     ap.add_argument("--feedback", default=env("SHOPPING_FEEDBACK"), help="feedback JSON Lines file (default: feedback.jsonl next to the database) [SHOPPING_FEEDBACK]")
     ap.add_argument("--cert", default=env("SHOPPING_CERT"), help="TLS certificate (PEM) to serve HTTPS [SHOPPING_CERT]")
     ap.add_argument("--key", default=env("SHOPPING_KEY"), help="TLS private key (PEM) [SHOPPING_KEY]")
-    ap.add_argument("--id-origin", default=env("ID_ORIGIN"), help="the 6j0.org identity server, e.g. https://id.6j0.org (required) [ID_ORIGIN]")
-    ap.add_argument("--id-app", default=env("ID_APP", "shopping-list"), help="this app's name in the identity server's APPS [ID_APP]")
-    ap.add_argument("--id-jwks-url", default=env("ID_JWKS_URL"), help="where to fetch the identity server's public keys (default: ID_ORIGIN/.well-known/jwks.json) [ID_JWKS_URL]")
-    ap.add_argument("--allowed-subs", default=env("ALLOWED_SUBS", ""), help="upgrading from one shared list: the 6j0.org identities (subs), comma- or space-separated, that shared it [ALLOWED_SUBS]")
-    ap.add_argument("--admin-sub", default=env("ADMIN_SUB", ""), help="the 6j0.org identity that can close and delete anyone's feedback [ADMIN_SUB]")
+    ap.add_argument("--id-origin", default=env("ID_ORIGIN"), help="the 6j0.org ID server, e.g. https://id.6j0.org (required) [ID_ORIGIN]")
+    ap.add_argument("--id-app", default=env("ID_APP", "shopping-list"), help="this app's name in the ID server's APPS [ID_APP]")
+    ap.add_argument("--id-jwks-url", default=env("ID_JWKS_URL"), help="where to fetch the ID server's public keys (default: ID_ORIGIN/.well-known/jwks.json) [ID_JWKS_URL]")
+    ap.add_argument("--allowed-subs", default=env("ALLOWED_SUBS", ""), help="upgrading from one shared list: the 6j0 IDs (subs), comma- or space-separated, that shared it [ALLOWED_SUBS]")
+    ap.add_argument("--admin-sub", default=env("ADMIN_SUB", ""), help="the 6j0 ID that can close and delete anyone's feedback [ADMIN_SUB]")
     ap.add_argument("--origin", default=env("ORIGIN", ""), help="this app's public origin, e.g. https://shopping.6j0.org; https: turns on Secure cookies [ORIGIN]")
     args = ap.parse_args()
 

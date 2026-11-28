@@ -1,5 +1,6 @@
-"""The server end to end, in-process, against a fake identity server: sign-in, sessions, a list per person, sharing a
-list by invite, upgrading from one shared list, feedback, identity deletion, cross-site refusal, and sign-out."""
+"""The server end to end, in-process, against a fake ID server: sign-in, sessions, a list per person, sharing a list
+by invite, upgrading from one shared list, feedback, temporary and deleted 6j0 IDs, cross-site refusal, and
+sign-out."""
 
 import http.client
 import json
@@ -151,7 +152,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.request("PATCH", f"/api/items/{item['id']}", {"checked": True}, sid=alice)[1]["checked"], True)
 
         bob, _ = self.sign_in("bob-sub")
-        self.assertEqual(self.names(bob), [], "a new identity gets a new list, not someone else's")
+        self.assertEqual(self.names(bob), [], "a new 6j0 ID gets a new list, not someone else's")
         for method, body in [("PUT", {"name": "Mine now"}), ("DELETE", None)]:
             with self.subTest(method=method):
                 self.assertEqual(self.request(method, f"/api/items/{item['id']}", body, sid=bob)[0], 404)
@@ -413,7 +414,27 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.request("POST", "/api/id/login", {"token": token, "nonce": NONCE},
                                       headers={"Sec-Fetch-Site": "same-site"})[0], 403)
 
-    def test_identity_deletion(self):
+    def test_temporary_id(self):
+        # No saved claim counts as saved.
+        saved, _ = self.sign_in("saved-sub")
+        me = self.request("GET", "/api/me", sid=saved)[1]
+        self.assertNotIn("idUnsaved", me)
+        # A temporary 6j0 ID: /api/me says so until a sign-in says it's saved, in every session.
+        token = self.id.sign_in_token("temp-sub", APP, NONCE, saved=False)
+        status, _, res = self.request("POST", "/api/id/login", {"token": token, "nonce": NONCE})
+        self.assertEqual(status, 200)
+        temp = res.getheader("Set-Cookie").split(";")[0].split("=", 1)[1]
+        me = self.request("GET", "/api/me", sid=temp)[1]
+        self.assertEqual((me["idUnsaved"], me["idRecheck"]), (True, False), "unsaved, and just checked")
+        with server._db_lock:  # a week later, the page should sign in again to check
+            server._db.execute("UPDATE users SET checked = ? WHERE sub = 'temp-sub'", (server._now_ms() - 8 * server.DAY_MS,))
+            server._db.commit()
+        self.assertTrue(self.request("GET", "/api/me", sid=temp)[1]["idRecheck"])
+        token = self.id.sign_in_token("temp-sub", APP, NONCE, saved=True)
+        self.assertEqual(self.request("POST", "/api/id/login", {"token": token, "nonce": NONCE})[0], 200)
+        self.assertNotIn("idUnsaved", self.request("GET", "/api/me", sid=temp)[1], "saved now, in the older session too")
+
+    def test_id_deletion(self):
         gone, _ = self.sign_in("deleted-sub")
         status, post, _ = self.request("POST", "/api/feedback", {"body": "Delete me later"}, sid=gone)
         self.assertEqual(status, 201)
@@ -434,7 +455,7 @@ class ServerTest(unittest.TestCase):
         with server._db_lock:
             left = server._db.execute("SELECT COUNT(*) FROM items WHERE list_id = ?", (list_id,)).fetchone()[0]
         self.assertEqual(left, 0, "a list nobody else is on goes too")
-        # Unknown identities are fine too, so the identity server stops retrying.
+        # Unknown 6j0 IDs are fine too, so the ID server stops retrying.
         self.assertEqual(self.request("POST", "/api/id/deleted", {"token": self.id.deletion_token("never-here", APP)})[0], 200)
 
     def test_sign_out(self):
@@ -530,7 +551,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.shortcut(newer, {"name": "Eggs"})[0], 401)
         self.assertEqual(self.request("GET", "/api/token", sid=sid)[1], {"token": None})
 
-    def test_identity_deletion_ends_api_tokens(self):
+    def test_id_deletion_ends_api_tokens(self):
         sid, _ = self.sign_in("siri-gone")
         token = self.request("POST", "/api/token", {}, sid=sid)[1]["token"]
         self.request("POST", "/api/id/deleted", {"token": self.id.deletion_token("siri-gone", APP)})
@@ -567,7 +588,7 @@ class UpgradeTest(unittest.TestCase):
             try:
                 server.init_db(path)
                 self.assertIn("belong to no list", server.claim_unowned(frozenset()), "nothing moves without ALLOWED_SUBS")
-                self.assertIn("2 unowned items and 2 identities",
+                self.assertIn("2 unowned items and 2 IDs",
                               server.claim_unowned(frozenset({"signed-in-before", "not-yet"})))
                 self.assertIsNone(server.claim_unowned(frozenset({"signed-in-before", "not-yet"})), "runs once")
                 rows = dict(server._db.execute("SELECT sub, list_id FROM users").fetchall())

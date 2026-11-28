@@ -244,7 +244,7 @@ function showView(view) {
   if (view === "feedback") $("#view-feedback").replaceChildren(feedbackElement());
 }
 
-// ---------- Sign-in (6j0.org identity; see signin.js) ----------
+// ---------- Sign-in (6j0 ID; see signin.js) ----------
 // Only one screen shows at a time: loading, sign-in, or the app itself.
 function showOnly(id) {
   $("#loading").hidden = true;
@@ -253,6 +253,7 @@ function showOnly(id) {
 
 function showSignIn(error = "") {
   state.me = null;
+  $("#id-unsaved").hidden = true;
   $(".tabs").hidden = true;
   $("#feedback-btn").hidden = true;
   $("#share-btn").hidden = true;
@@ -282,7 +283,27 @@ async function signOut() {
   location.replace(location.pathname);
 }
 
-// Who's signed in: { isAdmin }, or null when nobody is.
+// A temporary 6j0 ID (made with the ID server's temporary-ID button) lives only in the browser that made it until
+// it's saved at the ID server; /api/me says idUnsaved. The page warns, with a link to save it at <idOrigin>/#save.
+// Sign-in runs again (an instant redirect while the ID server still has the ID) to see whether it's been saved: on
+// the next start within a day of following that link, and otherwise once a week (idRecheck), which also keeps the
+// ID in use, so the ID server doesn't delete it. At most once every 10 minutes, so an ID server that can't sign the
+// browser in doesn't send it round in circles. True when it's sending the browser away.
+const ID_SAVE_CLICKED = "shopping-list:id-save-clicked", ID_RECHECKED = "shopping-list:id-rechecked";
+const storedTime = (k) => { try { return Number(localStorage.getItem(k)) || 0; } catch { return 0; } };
+const rememberTime = (k, v) => { try { localStorage.setItem(k, String(v)); } catch {} };
+async function showIdUnsaved(me, config) {
+  $("#id-unsaved").hidden = !me.idUnsaved;
+  if (!me.idUnsaved) return false;
+  $("#id-save").href = `${config.idOrigin}/#save`;
+  const now = Date.now();
+  if (!me.idRecheck && storedTime(ID_SAVE_CLICKED) < now - 24 * 3600 * 1000) return false;
+  if (storedTime(ID_RECHECKED) > now - 10 * 60 * 1000) return false;
+  rememberTime(ID_RECHECKED, now); rememberTime(ID_SAVE_CLICKED, 0);
+  try { await startIdSignIn(config); return true; } catch (e) { console.warn(e); return false; }
+}
+
+// Who's signed in: { isAdmin, settings, idUnsaved?, idRecheck? }, or null when nobody is.
 async function fetchMe() {
   const res = await fetch("/api/me");
   if (res.status === 401) return null;
@@ -291,7 +312,7 @@ async function fetchMe() {
 }
 
 // ---------- Sharing ----------
-// An invite link is /#join=<code>. The code is kept in sessionStorage so it survives the trip to the identity server
+// An invite link is /#join=<code>. The code is kept in sessionStorage so it survives the trip to the ID server
 // when the person isn't signed in yet.
 const JOIN_KEY = "shopping-list:join";
 
@@ -985,6 +1006,7 @@ async function boot() {
   $("#signin-btn").addEventListener("click", (e) => signIn(e.currentTarget));
   $("#signout-btn").addEventListener("click", signOut);
   $("#feedback-btn").addEventListener("click", () => showView("feedback"));
+  $("#id-save").addEventListener("click", () => rememberTime(ID_SAVE_CLICKED, Date.now()));
   wireShare();
   wireSiri();
   wireSettings();
@@ -998,6 +1020,11 @@ async function boot() {
   if (!me) return showSignIn(signInError);
   if (signInError) toast(signInError); // e.g. a stale sign-in link, while an earlier session is still good
   state.me = me;
+  const config = await fetch("/api/config").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (config?.idOrigin) {
+    $("#delete-at-id").href = `${config.idOrigin}/#delete`;
+    if (await showIdUnsaved(me, config)) return; // on the way to the ID server to check again
+  }
   applySettings(me.settings || {});
   $("#signout-btn").hidden = false;
   $("#share-btn").hidden = false;

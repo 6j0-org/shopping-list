@@ -1,4 +1,4 @@
-"""idtoken.py: sign-in tokens and deletion notices from a 6j0.org identity server, and everything that must make
+"""idtoken.py: sign-in tokens and deletion notices from the 6j0.org ID server, and everything that must make
 them fail."""
 
 import sys
@@ -59,8 +59,8 @@ class IdTokenTest(unittest.TestCase):
         self.fails(lambda: self.verify(tok(), nonce="m" * 32), "does not match this sign-in")
         self.fails(lambda: self.verify(tok(), nonce=None), "does not match this sign-in")
         self.fails(lambda: self.verify(tok(), audience="glaze-journal"), "different app")
-        self.fails(lambda: self.verify(tok(), issuer="https://id.example"), "different identity server")
-        self.fails(lambda: self.verify(tok(iss="https://id.example")), "different identity server")
+        self.fails(lambda: self.verify(tok(), issuer="https://id.example"), "different ID server")
+        self.fails(lambda: self.verify(tok(iss="https://id.example")), "different ID server")
         with_sub = lambda sub: self.id.sign({"iss": self.id.origin, "sub": sub, "aud": APP, "nonce": NONCE})  # noqa: E731
         self.fails(lambda: self.verify(with_sub("")), "subject")
         self.fails(lambda: self.verify(with_sub("x" * 65)), "subject")
@@ -95,7 +95,7 @@ class IdTokenTest(unittest.TestCase):
         self.fails(lambda: self.deleted(self.id.deletion_token("sub-3", APP, nonce=NONCE)), "not a deletion notice")
         self.fails(lambda: self.deleted(self.id.deletion_token("sub-3", APP, events={})), "not a deletion notice")
 
-    def test_unreachable_identity_server(self):
+    def test_unreachable_id_server(self):
         with self.assertRaises(idtoken.JwksError):
             idtoken.verify_id_token(self.id.sign_in_token("s", APP, NONCE), issuer=self.id.origin, audience=APP,
                                     nonce=NONCE, jwks_url="http://127.0.0.1:9/.well-known/jwks.json")

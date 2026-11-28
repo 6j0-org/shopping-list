@@ -1,9 +1,9 @@
-"""Verifies tokens from a 6j0.org identity server. A port of idtoken.js from the 6j0.org Node apps.
+"""Verifies tokens from the 6j0.org ID server. A port of idtoken.js from the 6j0.org Node apps.
 
-Tokens are compact JWTs signed with Ed25519 ("EdDSA"). The public keys come from the identity server's JWKS
+Tokens are compact JWTs signed with Ed25519 ("EdDSA"). The public keys come from the ID server's JWKS
 (ID_JWKS_URL, default ID_ORIGIN + /.well-known/jwks.json), cached and re-fetched when an unknown kid shows up.
 A token is accepted once: iss, aud, exp, and iat must check out, and its jti is remembered until it expires.
-Sign-in tokens also carry the nonce the page made. Deletion notices (an identity was deleted) are checked the same
+Sign-in tokens also carry the nonce the page made. Deletion notices (a 6j0 ID was deleted) are checked the same
 way, but have no nonce and carry an event instead, so neither kind can stand in for the other.
 
 Python's standard library has no Ed25519, so this uses the `cryptography` package for the signature check.
@@ -30,7 +30,7 @@ class IdTokenError(Exception):
 
 
 class JwksError(Exception):
-    """The identity server's keys couldn't be loaded (a server problem, not a bad token)."""
+    """The ID server's keys couldn't be loaded (a server problem, not a bad token)."""
 
 
 _lock = threading.Lock()
@@ -66,7 +66,7 @@ def _refresh_keys(jwks_url):
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.load(resp)
     except Exception as e:  # network trouble, HTTP errors, bad JSON
-        raise JwksError(f"Couldn't load the identity server's keys from {jwks_url}: {e}") from e
+        raise JwksError(f"Couldn't load the ID server's keys from {jwks_url}: {e}") from e
     nxt = {}
     listed = data.get("keys") if isinstance(data, dict) else None
     for k in listed if isinstance(listed, list) else []:
@@ -106,7 +106,7 @@ def _check(token, issuer, audience, jwks_url):
     now = int(time.time())
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
     if claims.get("iss") != issuer:
-        raise IdTokenError("Sign-in token is from a different identity server")
+        raise IdTokenError("Sign-in token is from a different ID server")
     if claims.get("aud") != audience:
         raise IdTokenError("Sign-in token is for a different app")
     if not num(claims.get("exp")) or claims["exp"] + CLOCK_SKEW_S < now:
@@ -135,7 +135,7 @@ def _use(claims):
 
 
 def verify_id_token(token, *, issuer, audience, nonce, jwks_url):
-    """A sign-in token. Returns its claims ({"sub": ...}) or raises IdTokenError (or JwksError)."""
+    """A sign-in token. Returns its claims ({"sub": ..., "saved"?: ...}) or raises IdTokenError (or JwksError)."""
     claims = _check(token, issuer, audience, jwks_url)
     if "events" in claims:
         raise IdTokenError("That's not a sign-in token")
@@ -145,8 +145,9 @@ def verify_id_token(token, *, issuer, audience, nonce, jwks_url):
 
 
 def verify_deletion_token(token, *, issuer, audience, jwks_url):
-    """A notice that an identity was deleted (the identity server POSTs it to /api/id/deleted): signed like a sign-in
-    token, but with no nonce and with events: {"6j0/v1/identity-deleted": {}}. Returns its claims or raises."""
+    """A notice that a 6j0 ID was deleted (the ID server POSTs it to /api/id/deleted): signed like a sign-in token,
+    but with no nonce and with events: {"6j0/v1/identity-deleted": {}} (the event's name is from before "ID", and
+    stays). Returns its claims or raises."""
     claims = _check(token, issuer, audience, jwks_url)
     events = claims.get("events")
     if "nonce" in claims or not isinstance(events, dict) or DELETED_EVENT not in events:
